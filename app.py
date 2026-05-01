@@ -33,10 +33,10 @@ if not st.session_state.logueado:
     with col_img:
         try: 
             # Usamos tu imagen local. Asegúrate de que el nombre sea EXACTO.
-            st.image("servicio_automotriz.jpg", use_container_width=True)
+            st.image("autosLogin.jpg", use_container_width=True)
         except: 
             # Si falla, mostramos un aviso técnico para que sepas qué pasó
-            st.warning("Imagen 'servicio_automotriz.jpg' no encontrada en la raíz del proyecto.")
+            st.warning("Imagen 'autosLogin.jpg' no encontrada en la raíz del proyecto.")
             st.info("💡 Consejo: Verifica que el nombre no tenga mayúsculas diferentes (ej: .JPG vs .jpg)")
             
     with col_form:
