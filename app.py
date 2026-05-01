@@ -32,9 +32,13 @@ if not st.session_state.logueado:
     col_img, col_form = st.columns([1, 1])
     with col_img:
         try: 
+            # Usamos tu imagen local. Asegúrate de que el nombre sea EXACTO.
             st.image("servicio_automotriz.jpg", use_container_width=True)
         except: 
-            st.warning("Sistema en modo offline")
+            # Si falla, mostramos un aviso técnico para que sepas qué pasó
+            st.warning("Imagen 'servicio_automotriz.jpg' no encontrada en la raíz del proyecto.")
+            st.info("💡 Consejo: Verifica que el nombre no tenga mayúsculas diferentes (ej: .JPG vs .jpg)")
+            
     with col_form:
         with st.form("login_form", clear_on_submit=True):
             u = st.text_input("Usuario")
