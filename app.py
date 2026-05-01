@@ -224,17 +224,42 @@ else:
         # PESTAÑA 4: USUARIOS
         with tabs[4]:
             st.header("Gestión de Usuarios")
-            with st.form("crear_u", clear_on_submit=True):
-                c1, c2, c3 = st.columns(3)
-                u_n = c1.text_input("Nombre Usuario")
-                u_p = c2.text_input("Contraseña", type="password")
-                u_r = c3.selectbox("Rol", ["Mecanico", "Administrador"])
-                if st.form_submit_button("Crear"):
-                    conn = sqlite3.connect('conocimiento.db')
-                    cur = conn.cursor()
-                    try:
-                        cur.execute("INSERT INTO usuarios (usuario, password, rol) VALUES (?, ?, ?)", (u_n, u_p, u_r))
+            conn = sqlite3.connect('conocimiento.db')
+            
+            # Sub-pestañas para organizar Crear y Eliminar
+            sub_crear, sub_eliminar = st.tabs(["➕ Crear Usuario", "🗑️ Eliminar Usuario"])
+            
+            with sub_crear:
+                with st.form("crear_u", clear_on_submit=True):
+                    c1, c2, c3 = st.columns(3)
+                    u_n = c1.text_input("Nombre Usuario")
+                    u_p = c2.text_input("Contraseña", type="password")
+                    u_r = c3.selectbox("Rol", ["Mecanico", "Administrador"])
+                    if st.form_submit_button("Crear"):
+                        cur = conn.cursor()
+                        try:
+                            cur.execute("INSERT INTO usuarios (usuario, password, rol) VALUES (?, ?, ?)", (u_n, u_p, u_r))
+                            conn.commit()
+                            st.success(f"Usuario '{u_n}' creado.")
+                        except sqlite3.IntegrityError: 
+                            st.error("Error: El usuario ya existe.")
+            
+            with sub_eliminar:
+                # Mostrar usuarios actuales
+                df_usuarios = pd.read_sql_query("SELECT id, usuario, rol FROM usuarios", conn)
+                st.dataframe(df_usuarios, use_container_width=True)
+                
+                # Selector para eliminar
+                usuario_a_borrar = st.selectbox("Seleccione el usuario a eliminar", df_usuarios['usuario'])
+                
+                if st.button("🚨 Eliminar Usuario Definitivamente", type="primary"):
+                    if usuario_a_borrar == st.session_state.user:
+                        st.error("Por seguridad, no puedes eliminar tu propia sesión activa.")
+                    else:
+                        cur = conn.cursor()
+                        cur.execute("DELETE FROM usuarios WHERE usuario=?", (usuario_a_borrar,))
                         conn.commit()
-                        st.success("Usuario creado.")
-                    except: st.error("Error o usuario duplicado.")
-                    conn.close()
+                        st.success(f"Usuario '{usuario_a_borrar}' eliminado del sistema.")
+                        st.rerun() # Recarga para actualizar la tabla
+            
+            conn.close()
