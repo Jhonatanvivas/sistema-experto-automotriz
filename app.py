@@ -112,6 +112,7 @@ else:
                             motor.registrar_estadistica(codigo, "DTC", tipo_v, "Acierto 1er Intento")
                             st.success("Registrado.")
                             st.session_state.paso_diag = 0
+                            st.rerun()
                         if col2.button("❌ No funcionó"):
                             st.session_state.paso_diag = 2
                             st.rerun()
@@ -126,6 +127,7 @@ else:
                             motor.registrar_estadistica(codigo, "DTC", tipo_v, "Acierto 2do Intento")
                             st.success("Registrado.")
                             st.session_state.paso_diag = 0
+                            st.rerun()
                         if col2.button("Tampoco funcionó"):
                             st.session_state.paso_diag = 3
                             st.rerun()
@@ -135,6 +137,7 @@ else:
                             motor.registrar_caso_pendiente(codigo, tipo_v, obs, "DTC")
                             st.success("Fallo registrado.")
                             st.session_state.paso_diag = 0
+                            st.rerun()
                 else: st.error("Código no encontrado.")
 
         # --- NUEVA LÓGICA DE SÍNTOMAS ---
@@ -143,24 +146,31 @@ else:
             col_a, col_b = st.columns([1, 4])
             if col_a.button("Analizar Síntoma"): 
                 st.session_state.paso_sintoma = 1
-                st.session_state.indice_sintoma = 0 # Reiniciamos el índice
+                st.session_state.indice_sintoma = 0
             if col_b.button("Limpiar Síntoma"):
                 st.session_state.paso_sintoma = 0
                 st.session_state.indice_sintoma = 0
                 st.rerun()
 
             if st.session_state.paso_sintoma == 1 and sint:
-                resultados = motor.buscar_por_sintoma(sint, tipo_v)
+                resultados_raw = motor.buscar_por_sintoma(sint, tipo_v)
                 
-                if resultados:
+                if resultados_raw:
+                    # NUEVA LÓGICA: Creamos una lista de TODAS las causas disponibles (primarias y secundarias)
+                    opciones = []
+                    for r in resultados_raw:
+                        # r[4]=Causa P, r[5]=Solucion P, r[6]=Causa S, r[7]=Solucion S
+                        opciones.append({"dtc": r[1], "causa": r[4], "sol": r[5], "tipo": "Principal"})
+                        if r[6] and r[6].strip(): # Si existe la secundaria, la añadimos como opción siguiente
+                            opciones.append({"dtc": r[1], "causa": r[6], "sol": r[7], "tipo": "Secundaria"})
+                    
                     indice = st.session_state.indice_sintoma
-                    if indice < len(resultados):
-                        r = resultados[indice] # R es la tupla (DTC, Sintoma, Causa, Solucion, ...) dependiendo de tu DB
-                        
-                        st.info(f"💡 Posible Solución {indice + 1} de {len(resultados)}")
-                        st.write(f"**Relacionado con DTC:** {r[0]}")
-                        st.write(f"**Causa:** {r[2]}")
-                        st.write(f"**Solución:** {r[3]}")
+                    if indice < len(opciones):
+                        opc = opciones[indice]
+                        st.info(f"💡 Solución Sugerida ({opc['tipo']}) - Opción {indice + 1} de {len(opciones)}")
+                        st.write(f"**Relacionado con DTC:** {opc['dtc']}")
+                        st.write(f"**Causa:** {opc['causa']}")
+                        st.write(f"**Solución:** {opc['sol']}")
                         
                         c1, c2 = st.columns(2)
                         if c1.button("✅ Resolvió el problema", key=f"btn_si_{indice}"):
@@ -174,18 +184,16 @@ else:
                             st.session_state.indice_sintoma += 1
                             st.rerun()
                     else:
-                        st.warning("⚠️ Se agotaron las soluciones en la base de datos para este síntoma.")
+                        st.warning("⚠️ Se agotaron todas las soluciones (principales y secundarias) para este síntoma.")
                         obs = st.text_area("Añade una observación detallada del caso:")
                         if st.button("Enviar Reporte a Experto"):
                             motor.registrar_caso_pendiente(sint, tipo_v, obs, "Sintoma")
-                            st.success("Reporte enviado. ¡Gracias por la retroalimentación!")
+                            st.success("Reporte enviado.")
                             st.session_state.paso_sintoma = 0
                             st.session_state.indice_sintoma = 0
+                            st.rerun()
                 else:
                     st.info("Sin coincidencias en la base de datos.")
-                    if st.button("Reportar Síntoma no resuelto"):
-                        motor.registrar_caso_pendiente(sint, tipo_v, "No hay coincidencia en base", "Sintoma")
-                        st.success("Sintoma reportado para futura investigación.")
 
     # PESTAÑAS SÓLO ADMINISTRADOR
     if st.session_state.rol == "Administrador":
@@ -214,6 +222,7 @@ else:
                         cur.execute('INSERT INTO reglas_diagnostico (dtc,tipo_vehiculo,sintoma,causa_principal,solucion_principal,causa_secundaria,solucion_secundaria,protocolo_seguridad) VALUES (?,?,?,?,?,?,?,?)', (n_dtc, n_tec, n_sin, n_cp, n_sp, n_cs, n_ss, n_prot))
                         conn.commit()
                         st.success("Guardado.")
+                        st.rerun() # <--- ESTO ACTUALIZA LA TABLA EN VIVO
 
             # --- NUEVA LÓGICA DE EDITAR (Botón Limpiar/Restaurar) ---
             with sub2:
@@ -241,6 +250,7 @@ else:
                             if st.form_submit_button("Actualizar"):
                                 motor.actualizar_regla(id_ed, e_dtc, e_tec, e_sin, e_cp, e_sp, e_cs, e_ss, e_prot)
                                 st.success("Actualizado.")
+                                st.rerun() # Recargar para mostrar cambios
 
             # --- NUEVA LÓGICA DE ELIMINAR ---
             with sub3:
