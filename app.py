@@ -59,12 +59,16 @@ if 'logueado' not in st.session_state:
         # DTC
         'paso_diag'      : 0,
         'dtc_actual'     : '',
-        'dtc_inicio'     : 0,       # timestamp inicio para medir duración
+        'dtc_inicio'     : 0,
         # Síntomas
         'paso_sint'      : 0,
         'sint_actual'    : '',
         'sint_res'       : None,
         'sint_inicio'    : 0,
+        # PDF listo para descarga (sobrevive al rerun)
+        'pdf_bytes'      : None,
+        'pdf_filename'   : '',
+        'diag_mensaje'   : '',
     })
 
 motor = MotorInferencia()
@@ -287,6 +291,24 @@ else:
     # ══════════════════════════════════════════════════════════
     with tabs[0]:
         st.header("🔍 Motor de Inferencia")
+
+        # ── Mostrar PDF y mensaje de éxito tras rerun ─────────────────────────
+        if st.session_state.get('pdf_bytes') and st.session_state.get('diag_mensaje'):
+            st.success(st.session_state.diag_mensaje)
+            st.download_button(
+                "📄 Descargar Reporte PDF",
+                data=st.session_state.pdf_bytes,
+                file_name=st.session_state.pdf_filename,
+                mime="application/pdf",
+                key="pdf_download_banner"
+            )
+            if st.button("✖ Cerrar y nuevo diagnóstico", key="cerrar_pdf"):
+                st.session_state.pdf_bytes    = None
+                st.session_state.pdf_filename = ''
+                st.session_state.diag_mensaje = ''
+                st.rerun()
+            st.divider()
+
         metodo = st.radio("Método de entrada:", ["DTC (Escáner)", "Síntomas (Texto)"], horizontal=True)
         tipo_v = st.selectbox("Motorización", ["Combustión", "Híbrido", "Eléctrico"])
 
@@ -320,7 +342,6 @@ else:
                                 st.session_state.user, "DTC",
                                 st.session_state.dtc_actual, tipo_v,
                                 res['causa_p'], res['solucion_p'], "Acierto 1er Intento")
-                            # PDF
                             datos_pdf = {
                                 "usuario": st.session_state.user,
                                 "fecha": datetime.now().strftime("%d/%m/%Y %H:%M"),
@@ -331,13 +352,11 @@ else:
                                 "seguridad": res['seguridad'],
                                 "resultado": "Resuelto en 1er intento"
                             }
-                            pdf_bytes = generar_pdf_diagnostico(datos_pdf)
-                            st.success("✅ Diagnóstico exitoso registrado.")
-                            st.download_button(
-                                "📄 Descargar Reporte PDF", data=pdf_bytes,
-                                file_name=f"diagnostico_{st.session_state.dtc_actual}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-                                mime="application/pdf")
+                            st.session_state.pdf_bytes    = generar_pdf_diagnostico(datos_pdf)
+                            st.session_state.pdf_filename = f"diagnostico_{st.session_state.dtc_actual}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+                            st.session_state.diag_mensaje = "✅ Diagnóstico exitoso registrado. Descarga el reporte abajo."
                             reset_diag()
+                            st.rerun()
 
                         if col2.button("❌ No funcionó"):
                             st.session_state.paso_diag = 2; st.rerun()
@@ -369,13 +388,11 @@ else:
                                 "seguridad": res['seguridad'],
                                 "resultado": "Resuelto en 2do intento"
                             }
-                            pdf_bytes = generar_pdf_diagnostico(datos_pdf)
-                            st.success("✅ Diagnóstico exitoso registrado.")
-                            st.download_button(
-                                "📄 Descargar Reporte PDF", data=pdf_bytes,
-                                file_name=f"diagnostico_{st.session_state.dtc_actual}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-                                mime="application/pdf")
+                            st.session_state.pdf_bytes    = generar_pdf_diagnostico(datos_pdf)
+                            st.session_state.pdf_filename = f"diagnostico_{st.session_state.dtc_actual}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+                            st.session_state.diag_mensaje = "✅ Diagnóstico exitoso registrado. Descarga el reporte abajo."
                             reset_diag()
+                            st.rerun()
 
                         if col2.button("❌ Tampoco funcionó"):
                             st.session_state.paso_diag = 3; st.rerun()
@@ -457,13 +474,11 @@ else:
                         "seguridad": seguridad,
                         "resultado": "Resuelto en 1er intento"
                     }
-                    pdf_bytes = generar_pdf_diagnostico(datos_pdf)
-                    st.success("✅ Diagnóstico exitoso registrado.")
-                    st.download_button(
-                        "📄 Descargar Reporte PDF", data=pdf_bytes,
-                        file_name=f"diagnostico_sint_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-                        mime="application/pdf")
-                    reset_sint(); st.rerun()
+                    st.session_state.pdf_bytes    = generar_pdf_diagnostico(datos_pdf)
+                    st.session_state.pdf_filename = f"diagnostico_sint_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+                    st.session_state.diag_mensaje = "✅ Diagnóstico exitoso registrado. Descarga el reporte abajo."
+                    reset_sint()
+                    st.rerun()
 
                 if col2.button("❌ No funcionó", key="sint_no1"):
                     st.session_state.paso_sint = 2; st.rerun()
@@ -497,13 +512,11 @@ else:
                         "seguridad": r.get('seguridad',''),
                         "resultado": "Resuelto en 2do intento"
                     }
-                    pdf_bytes = generar_pdf_diagnostico(datos_pdf)
-                    st.success("✅ Diagnóstico exitoso registrado.")
-                    st.download_button(
-                        "📄 Descargar Reporte PDF", data=pdf_bytes,
-                        file_name=f"diagnostico_sint_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-                        mime="application/pdf")
-                    reset_sint(); st.rerun()
+                    st.session_state.pdf_bytes    = generar_pdf_diagnostico(datos_pdf)
+                    st.session_state.pdf_filename = f"diagnostico_sint_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+                    st.session_state.diag_mensaje = "✅ Diagnóstico exitoso registrado. Descarga el reporte abajo."
+                    reset_sint()
+                    st.rerun()
 
                 if col2.button("❌ Tampoco funcionó", key="sint_no2"):
                     st.session_state.paso_sint = 3; st.rerun()
@@ -768,14 +781,15 @@ else:
                 rango    = col_f2.selectbox("Período:",
                     ["Hoy","Últimos 7 días","Últimos 30 días","Todo"])
 
-                # Filtro fecha
+                # Filtro fecha — sin timezone para compatibilidad con SQLite
                 ahora = datetime.now()
-                rangos = {"Hoy": 0, "Últimos 7 días": 7, "Últimos 30 días": 30, "Todo": 9999}
+                hist['fecha_dt'] = pd.to_datetime(hist['fecha'], errors='coerce')
+                rangos = {"Hoy": 1, "Últimos 7 días": 7, "Últimos 30 días": 30, "Todo": 9999}
                 dias   = rangos[rango]
-                hist['fecha_dt'] = pd.to_datetime(hist['fecha'])
                 if dias < 9999:
                     desde = ahora - timedelta(days=dias)
-                    hist  = hist[hist['fecha_dt'] >= desde]
+                    # Comparar sin timezone
+                    hist = hist[hist['fecha_dt'].dt.tz_localize(None) >= desde]
                 if tec_sel != "Todos":
                     hist = hist[hist['usuario'] == tec_sel]
 
@@ -837,8 +851,14 @@ else:
                     mime="text/csv"
                 )
             else:
-                st.info("Aún no hay diagnósticos registrados en el historial.")
-                st.caption("Los diagnósticos aparecen aquí automáticamente cuando los técnicos usen el sistema.")
+                # Verificar si hay datos en BD pero el filtro los oculta
+                with sqlite3.connect('conocimiento.db') as _conn:
+                    _total_hist = pd.read_sql_query("SELECT COUNT(*) as c FROM historial_diagnosticos", _conn).iloc[0]['c']
+                if _total_hist > 0:
+                    st.warning(f"⚠️ Hay **{_total_hist} diagnóstico(s)** en la BD pero el filtro actual no muestra ninguno. Cambia el período a **'Todo'** o selecciona **'Todos'** los técnicos.")
+                else:
+                    st.info("Aún no hay diagnósticos registrados en el historial.")
+                    st.caption("Los diagnósticos aparecen aquí automáticamente cuando los técnicos usen el sistema.")
 
         # ── PESTAÑA 5 — USUARIOS ───────────────────────────────
         with tabs[5]:
