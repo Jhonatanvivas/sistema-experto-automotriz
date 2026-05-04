@@ -105,6 +105,18 @@ def duracion_desde(ts):
     return int(time.time() - ts) if ts else 0
 
 # ── Generador de PDF ──────────────────────────────────────────
+def _pdf_texto(val) -> str:
+    """Convierte cualquier valor a texto seguro para FPDF (sin None, sin caracteres raros)."""
+    texto = str(val) if val is not None else "---"
+    # Reemplaza caracteres que fpdf2 no puede renderizar en Helvetica
+    replacements = {
+        "\u2019": "'", "\u2018": "'", "\u201c": '"', "\u201d": '"',
+        "\u2013": "-", "\u2014": "-", "\u2026": "...",
+    }
+    for orig, rep in replacements.items():
+        texto = texto.replace(orig, rep)
+    return texto or "---"
+
 def generar_pdf_diagnostico(datos: dict) -> bytes:
     pdf = FPDF()
     pdf.add_page()
@@ -113,7 +125,7 @@ def generar_pdf_diagnostico(datos: dict) -> bytes:
     # Encabezado
     pdf.set_fill_color(30, 30, 50)
     pdf.set_text_color(255, 255, 255)
-    pdf.set_font("Helvetica", "B", 18)
+    pdf.set_font("Helvetica", "B", 16)
     pdf.cell(0, 14, "EXPERT-AUTO POPAYAN", ln=True, align="C", fill=True)
     pdf.set_font("Helvetica", "", 10)
     pdf.cell(0, 8, "Reporte de Diagnostico Automotriz", ln=True, align="C", fill=True)
@@ -127,18 +139,19 @@ def generar_pdf_diagnostico(datos: dict) -> bytes:
     pdf.set_font("Helvetica", "", 10)
 
     campos = [
-        ("Tecnico",          datos.get("usuario",   "---")),
-        ("Fecha / Hora",     datos.get("fecha",     "---")),
-        ("Tipo de vehiculo", datos.get("tecnologia","---")),
-        ("Metodo",           datos.get("metodo",    "---")),
-        ("Entrada",          datos.get("entrada",   "---")),
-        ("Duracion",         datos.get("duracion",  "---")),
+        ("Tecnico",          datos.get("usuario",    "---")),
+        ("Fecha / Hora",     datos.get("fecha",      "---")),
+        ("Tipo de vehiculo", datos.get("tecnologia", "---")),
+        ("Metodo",           datos.get("metodo",     "---")),
+        ("Entrada",          datos.get("entrada",    "---")),
+        ("Duracion",         datos.get("duracion",   "---")),
     ]
     for label, val in campos:
         pdf.set_font("Helvetica", "B", 10)
         pdf.cell(50, 7, f"{label}:", border=0)
         pdf.set_font("Helvetica", "", 10)
-        pdf.multi_cell(0, 7, str(val))
+        # multi_cell ocupa toda la línea; usamos el ancho disponible (0 = hasta margen derecho)
+        pdf.multi_cell(0, 7, _pdf_texto(val))
 
     pdf.ln(3)
 
@@ -149,17 +162,17 @@ def generar_pdf_diagnostico(datos: dict) -> bytes:
     pdf.set_font("Helvetica", "", 10)
 
     secciones = [
-        ("Causa identificada",  datos.get("causa",    "---")),
-        ("Solucion aplicada",   datos.get("solucion", "---")),
-        ("Protocolo seguridad", datos.get("seguridad","---")),
-        ("Conclusion",          datos.get("resultado","---")),
+        ("Causa identificada",  datos.get("causa",     "---")),
+        ("Solucion aplicada",   datos.get("solucion",  "---")),
+        ("Protocolo seguridad", datos.get("seguridad", "---")),
+        ("Conclusion",          datos.get("resultado", "---")),
     ]
     for label, val in secciones:
         pdf.set_font("Helvetica", "B", 10)
         pdf.cell(0, 7, f"{label}:", ln=True)
-        pdf.set_font("Helvetica", "", 10)
+        pdf.set_font("Helvetica", "", 9)          # fuente más pequeña = más espacio horizontal
         pdf.set_fill_color(250, 250, 255)
-        pdf.multi_cell(0, 7, str(val), border=1, fill=True)
+        pdf.multi_cell(0, 6, _pdf_texto(val), border=1, fill=True)
         pdf.ln(2)
 
     # Pie
@@ -244,8 +257,8 @@ else:
                 conn, params=(st.session_state.user,))
         if not mis_diag.empty:
             total_yo = len(mis_diag)
-            exito_yo = mis_diag['resultado'].str.contains('Acierto', na=False).sum()
-            tasa_yo  = round(exito_yo/total_yo*100) if total_yo else 0
+            exito_yo = int(mis_diag['resultado'].str.contains('Acierto', na=False).sum())
+            tasa_yo  = round(exito_yo / total_yo * 100) if total_yo else 0
             st.markdown(f"""
             <div style='background:#111;border-radius:8px;padding:12px;font-size:13px;'>
                 <div style='color:#888;margin-bottom:6px;'>📊 Mi actividad</div>
@@ -652,9 +665,9 @@ else:
                 col_dur = 'duracion_seg'
 
                 total    = len(stats)
-                aciertos = stats[col_res].str.contains('Acierto', na=False).sum()
-                fallidos = total - int(aciertos)
-                tasa     = round(aciertos/total*100, 1) if total else 0
+                aciertos = int(stats[col_res].str.contains('Acierto', na=False).sum())
+                fallidos = total - aciertos
+                tasa     = round(aciertos / total * 100, 1) if total else 0
                 dur_prom = round(stats[col_dur].mean()) if col_dur in stats.columns else 0
 
                 # Métricas
@@ -738,6 +751,10 @@ else:
             st.header("🎓 Dashboard de Validación — Sprint 4")
             st.caption("Vista en tiempo real para las pruebas con los 6 técnicos de Popayán")
 
+            col_refresh, _ = st.columns([1, 4])
+            if col_refresh.button("🔄 Actualizar datos", use_container_width=True):
+                st.rerun()
+
             with sqlite3.connect('conocimiento.db') as conn:
                 hist = pd.read_sql_query(
                     "SELECT * FROM historial_diagnosticos ORDER BY fecha DESC", conn)
@@ -766,8 +783,8 @@ else:
 
                 # KPIs de validación
                 total_val = len(hist)
-                exito_val = hist['resultado'].str.contains('Acierto', na=False).sum()
-                tasa_val  = round(exito_val/total_val*100, 1) if total_val else 0
+                exito_val = int(hist['resultado'].str.contains('Acierto', na=False).sum())
+                tasa_val  = round(exito_val / total_val * 100, 1) if total_val else 0
                 dur_val   = 0
                 if not stats_val.empty and 'duracion_seg' in stats_val.columns:
                     dur_val = round(stats_val['duracion_seg'].mean())
@@ -801,9 +818,9 @@ else:
                 st.subheader("📊 Resultados por Técnico")
                 por_tec = hist.groupby('usuario').agg(
                     Total=('resultado','count'),
-                    Exitosos=('resultado', lambda x: x.str.contains('Acierto',na=False).sum())
+                    Exitosos=('resultado', lambda x: int(x.str.contains('Acierto',na=False).sum()))
                 ).reset_index()
-                por_tec['Tasa %'] = (por_tec['Exitosos']/por_tec['Total']*100).round(1)
+                por_tec['Tasa %'] = (por_tec['Exitosos'].astype(float) / por_tec['Total'].astype(float) * 100).round(1)
                 st.dataframe(por_tec, use_container_width=True, height=220)
 
                 # Historial detallado
