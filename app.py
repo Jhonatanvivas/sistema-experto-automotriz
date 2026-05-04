@@ -111,36 +111,51 @@ def duracion_desde(ts):
 # ── Generador de PDF ──────────────────────────────────────────
 def _pdf_texto(val) -> str:
     """Convierte cualquier valor a texto seguro para FPDF (sin None, sin caracteres raros)."""
-    texto = str(val) if val is not None else "---"
-    # Reemplaza caracteres que fpdf2 no puede renderizar en Helvetica
+    if val is None or str(val).strip() in ("", "None", "nan"):
+        return "No especificado"
+    texto = str(val)
+    # Reemplaza caracteres no-latin1 que Helvetica no puede renderizar
     replacements = {
         "\u2019": "'", "\u2018": "'", "\u201c": '"', "\u201d": '"',
         "\u2013": "-", "\u2014": "-", "\u2026": "...",
+        "\u00e1": "a", "\u00e9": "e", "\u00ed": "i",
+        "\u00f3": "o", "\u00fa": "u", "\u00f1": "n",
+        "\u00c1": "A", "\u00c9": "E", "\u00cd": "I",
+        "\u00d3": "O", "\u00da": "U", "\u00d1": "N",
+        "\u00fc": "u", "\u00e4": "a", "\u00f6": "o",
     }
     for orig, rep in replacements.items():
         texto = texto.replace(orig, rep)
-    return texto or "---"
+    # Fallback: encode a latin-1 ignorando lo que no se pueda
+    try:
+        texto.encode('latin-1')
+    except (UnicodeEncodeError, Exception):
+        texto = texto.encode('latin-1', errors='replace').decode('latin-1')
+    return texto.strip() or "No especificado"
 
 def generar_pdf_diagnostico(datos: dict) -> bytes:
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
 
+    # Ancho útil real de la página (A4 = 210mm, márgenes 10mm c/u por defecto)
+    ANCHO = pdf.w - pdf.l_margin - pdf.r_margin   # ≈ 190mm
+    LABEL_W = 52   # ancho de la columna etiqueta
+
     # Encabezado
     pdf.set_fill_color(30, 30, 50)
     pdf.set_text_color(255, 255, 255)
-    pdf.set_font("Helvetica", "B", 16)
-    pdf.cell(0, 14, "EXPERT-AUTO POPAYAN", ln=True, align="C", fill=True)
+    pdf.set_font("Helvetica", "B", 15)
+    pdf.cell(ANCHO, 13, "EXPERT-AUTO POPAYAN", ln=True, align="C", fill=True)
     pdf.set_font("Helvetica", "", 10)
-    pdf.cell(0, 8, "Reporte de Diagnostico Automotriz", ln=True, align="C", fill=True)
+    pdf.cell(ANCHO, 8, "Reporte de Diagnostico Automotriz", ln=True, align="C", fill=True)
     pdf.ln(4)
 
     # Datos generales
     pdf.set_text_color(0, 0, 0)
     pdf.set_fill_color(240, 240, 250)
     pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 9, "INFORMACION GENERAL", ln=True, fill=True)
-    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(ANCHO, 9, "INFORMACION GENERAL", ln=True, fill=True)
 
     campos = [
         ("Tecnico",          datos.get("usuario",    "---")),
@@ -151,19 +166,21 @@ def generar_pdf_diagnostico(datos: dict) -> bytes:
         ("Duracion",         datos.get("duracion",   "---")),
     ]
     for label, val in campos:
+        # Guardamos Y antes de imprimir la etiqueta
+        y_antes = pdf.get_y()
         pdf.set_font("Helvetica", "B", 10)
-        pdf.cell(50, 7, f"{label}:", border=0)
+        pdf.cell(LABEL_W, 7, f"{label}:", border=0)
+        # multi_cell con ancho explícito = ANCHO - LABEL_W, parte de X actual
         pdf.set_font("Helvetica", "", 10)
-        # multi_cell ocupa toda la línea; usamos el ancho disponible (0 = hasta margen derecho)
-        pdf.multi_cell(0, 7, _pdf_texto(val))
+        pdf.multi_cell(ANCHO - LABEL_W, 7, _pdf_texto(val))
+        # Si multi_cell avanzó varias líneas la Y ya quedó bien; si fue 1 línea también
 
     pdf.ln(3)
 
     # Resultado
     pdf.set_fill_color(240, 240, 250)
     pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 9, "RESULTADO DEL DIAGNOSTICO", ln=True, fill=True)
-    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(ANCHO, 9, "RESULTADO DEL DIAGNOSTICO", ln=True, fill=True)
 
     secciones = [
         ("Causa identificada",  datos.get("causa",     "---")),
@@ -173,10 +190,11 @@ def generar_pdf_diagnostico(datos: dict) -> bytes:
     ]
     for label, val in secciones:
         pdf.set_font("Helvetica", "B", 10)
-        pdf.cell(0, 7, f"{label}:", ln=True)
-        pdf.set_font("Helvetica", "", 9)          # fuente más pequeña = más espacio horizontal
+        pdf.cell(ANCHO, 7, f"{label}:", ln=True)
+        pdf.set_font("Helvetica", "", 9)
         pdf.set_fill_color(250, 250, 255)
-        pdf.multi_cell(0, 6, _pdf_texto(val), border=1, fill=True)
+        # Ancho explícito — nunca 0 para evitar el error de espacio
+        pdf.multi_cell(ANCHO, 6, _pdf_texto(val), border=1, fill=True)
         pdf.ln(2)
 
     # Pie
