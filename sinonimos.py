@@ -1,4 +1,4 @@
-# synonyms.py
+# sinonimos.py
 # Diccionario de sinónimos técnicos automotrices.
 # Cada clave es el término canónico que se guarda en la BD.
 # Los valores son variantes que los técnicos usan en el taller.
