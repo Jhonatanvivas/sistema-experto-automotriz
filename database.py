@@ -125,18 +125,16 @@ def inicializar_bd():
 
     # ── USUARIOS POR DEFECTO ──────────────────────────────────────────────────
     # Solo los insertamos si la tabla está vacía, para no duplicar en cada reinicio
-    cur.execute("SELECT COUNT(*) FROM usuarios")
-    total = cur.fetchone()
-    # RealDictCursor devuelve dict; accedemos por clave
-    if (total['count'] if 'count' in total else list(total.values())[0]) == 0:
-        cur.execute(
-            "INSERT INTO usuarios (usuario, password, rol) VALUES (%s, %s, %s)",
-            ('admin', hash_pw('admin123'), 'Administrador')
-        )
-        cur.execute(
-            "INSERT INTO usuarios (usuario, password, rol) VALUES (%s, %s, %s)",
-            ('taller1', hash_pw('taller123'), 'Mecanico')
-        )
+    # INSERT OR IGNORE equivalente en PostgreSQL: ON CONFLICT DO NOTHING
+    # Así nunca falla aunque los usuarios ya existan
+    cur.execute(
+        "INSERT INTO usuarios (usuario, password, rol) VALUES (%s, %s, %s) ON CONFLICT (usuario) DO NOTHING",
+        ('admin', hash_pw('admin123'), 'Administrador')
+    )
+    cur.execute(
+        "INSERT INTO usuarios (usuario, password, rol) VALUES (%s, %s, %s) ON CONFLICT (usuario) DO NOTHING",
+        ('taller1', hash_pw('taller123'), 'Mecanico')
+    )
 
     conn.commit()
     cur.close()
