@@ -135,7 +135,7 @@ def login(u, p):
         if not res:  # fallback para usuarios creados antes del hash
             cur.execute("SELECT rol FROM usuarios WHERE usuario=%s AND password=%s", (u, p))
             res = cur.fetchone()
-    return res[0] if res else None  # devuelve el rol o None si falla
+    return res['rol'] if res else None  # devuelve el rol o None si falla
 
 def cargar_reglas():
     """Trae todas las reglas de diagnóstico de la BD como un DataFrame.
