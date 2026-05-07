@@ -1,34 +1,53 @@
-import streamlit as st   # el framework que convierte este script en una app web
-import hashlib           # para cifrar contraseñas con SHA-256
-import time              # medir duración de los diagnósticos en segundos
-import io                # manejo de flujos de bytes (para el PDF en memoria)
-import pandas as pd      # manipulación de tablas y datos del dashboard
-import plotly.express as px    # gráficas interactivas rápidas
-import plotly.graph_objects as go     # gráficas con más control manual
-from datetime import datetime, timedelta   # fechas y cálculo de rangos temporales
-from fpdf import FPDF                       # generación del reporte PDF descargable
+# ══════════════════════════════════════════════════════════════════════════════
+# EXPERT-AUTO POPAYÁN — Sistema Experto de Diagnóstico Automotriz
+# Desarrollado con Python + Streamlit + SQLite
+#
+# Este archivo es el punto de entrada principal de la aplicación.
+# Aquí vive toda la interfaz de usuario: login, diagnóstico, administración
+# y el dashboard de validación del Sprint 4.
+#
+# La lógica del motor de inferencia está separada en inference_engine.py
+# para mantener el código limpio y modular.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# — Librerías estándar de Python —
+import streamlit as st      # el framework que convierte este script en una app web
+import hashlib              # para cifrar contraseñas con SHA-256
+import time                 # medir duración de los diagnósticos en segundos
+import io                   # manejo de flujos de bytes (para el PDF en memoria)
+import pandas as pd         # manipulación de tablas y datos del dashboard
+import plotly.express as px         # gráficas interactivas rápidas
+import plotly.graph_objects as go   # gráficas con más control manual
+from datetime import datetime, timedelta  # fechas y cálculo de rangos temporales
+from fpdf import FPDF                     # generación del reporte PDF descargable
 from inference_engine import MotorInferencia  # nuestro motor de reglas lógicas
-from database import get_conn, inicializar_bd
-inicializar_bd()  # Aseguramos que la base de datos y sus tablas existan antes de arrancar la app
- 
-# ══════════════════════════════════════════════════════════════
-# CONFIGURACIÓN
-# ══════════════════════════════════════════════════════════════
+from database import get_conn, inicializar_bd  # conexión y tablas en Supabase
+
+# Inicializamos la BD una sola vez al arrancar.
+# Con Supabase esto es seguro: usa CREATE TABLE IF NOT EXISTS,
+# así que si las tablas ya existen no hace nada.
+inicializar_bd()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CONFIGURACIÓN GLOBAL DE LA PÁGINA
+# Esto es lo primero que Streamlit necesita ejecutar antes de cualquier otra cosa
+# ══════════════════════════════════════════════════════════════════════════════
 st.set_page_config(
-    page_title="Expert-Auto Popayán", # título en la pestaña del navegador
-    page_icon="⚙️", 
-    layout="wide",                    # usamos todo el ancho de pantalla
-    initial_sidebar_state="expanded"  # la barra lateral arranca visible
+    page_title="Expert-Auto Popayán",  # título en la pestaña del navegador
+    page_icon="⚙️",
+    layout="wide",                     # usamos todo el ancho de pantalla
+    initial_sidebar_state="expanded"   # la barra lateral arranca visible
 )
 
-# CSS global — dashboard oscuro profesional
+# — Estilos visuales personalizados —
 # Inyectamos CSS directamente en el HTML que genera Streamlit.
 # Esto nos da control sobre colores, bordes y tipografía que Streamlit
 # no expone por defecto. El tema oscuro es intencional: los talleres
 # suelen trabajar con poca luz y el alto contraste ayuda a leer en pantalla.
 st.markdown("""
 <style>
-    /* Métricas grandes */
+    /* Tarjetas de métricas numéricas del dashboard */
     [data-testid="metric-container"] {
         background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
         border: 1px solid #0f3460;
@@ -39,11 +58,11 @@ st.markdown("""
     [data-testid="metric-container"] [data-testid="stMetricValue"] {
         color: #4CAF50 !important; font-size: 2rem !important; font-weight: 800 !important;
     }
-    /* Tabs */
+    /* Pestañas más legibles */
     .stTabs [data-baseweb="tab"] { font-weight: 600; font-size: 14px; }
-    /* Barra de confianza */
+    /* Barra de confianza del diagnóstico por síntoma */
     .conf-bar { height: 10px; border-radius: 5px; margin-top: 4px; }
-    /* Etiqueta de origen aprendizaje */
+    /* Etiquetas que distinguen reglas manuales de las aprendidas automáticamente */
     .badge-aprendizaje {
         background: #0f3460; color: #4CAF50; padding: 2px 8px;
         border-radius: 20px; font-size: 11px; font-weight: 700;
@@ -55,58 +74,73 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── Estado de sesión ───────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ESTADO DE SESIÓN
 # Streamlit re-ejecuta todo el script cada vez que el usuario interactúa.
 # session_state es el único lugar donde podemos guardar información entre
 # esas re-ejecuciones sin perderla. Lo inicializamos una sola vez al arrancar.
-
-
+# ══════════════════════════════════════════════════════════════════════════════
 if 'logueado' not in st.session_state:
     st.session_state.update({
-        'logueado'       : False,  # ¿hay alguien autenticado?
-        'rol'            : None,   # "Administrador" o "Mecanico"
-        'user'           : None,   # nombre de usuario activo
-        # Flujo de diagnóstico por DTC
+        'logueado'       : False,   # ¿hay alguien autenticado?
+        'rol'            : None,    # "Administrador" o "Mecanico"
+        'user'           : None,    # nombre de usuario activo
+
+        # — Flujo de diagnóstico por DTC —
         # paso_diag controla en qué etapa del árbol de decisión estamos:
         # 0 = sin iniciar, 1 = mostrando causa 1, 2 = causa 2, 3 = reporte
         'paso_diag'      : 0,
-        'dtc_actual'     : '',  # el código que el técnico ingresó
-        'dtc_inicio'     : 0,   # tiempo del momento en que empezó el diagnóstico
-        # Flujo de diagnóstico por Síntomas
+        'dtc_actual'     : '',      # el código que el técnico ingresó
+        'dtc_inicio'     : 0,       # timestamp Unix del momento en que empezó el diagnóstico
+
+        # — Flujo de diagnóstico por síntomas —
         # igual que DTC pero con su propio estado independiente
-        'paso_sint'      : 0,   # -1 = sin resultados, 1 = causa 1, 2 = causa 2, 3 = reporte
-        'sint_actual'    : '',  # texto del síntoma ingresado
-        'sint_res'       : None,  # el dict con la regla más probable que devolvió el motor
+        'paso_sint'      : 0,       # -1 = sin resultados, 1 = causa 1, 2 = causa 2, 3 = reporte
+        'sint_actual'    : '',      # texto del síntoma ingresado
+        'sint_res'       : None,    # el dict con la regla más probable que devolvió el motor
         'sint_inicio'    : 0,
-        # PDF listo para descarga 
+
+        # — PDF generado —
         # Guardamos los bytes del PDF aquí para que sobrevivan al st.rerun().
         # Sin esto, el PDF se regenera después del reset y explota si los datos ya no están.
         'pdf_bytes'      : None,
         'pdf_filename'   : '',
-        'diag_mensaje'   : '',   # mensaje de éxito que se muestra junto al botón de descarga
+        'diag_mensaje'   : '',      # mensaje de éxito que se muestra junto al botón de descarga
     })
 
 # Instanciamos el motor de inferencia una sola vez.
 # Este objeto abre conexiones a la BD y ejecuta las consultas de búsqueda.
 motor = MotorInferencia()
 
-# ══════════════════════════════════════════════════════════════
-# UTILIDADES
-# ══════════════════════════════════════════════════════════════
-def hash_pw(pw): return hashlib.sha256(pw.encode()).hexdigest() #Convierte una contraseña en texto plano a su hash SHA-256. 
-# Nunca guardamos contraseñas en la BD
 
-def login(u, p): #Verifica credenciales contra la base de datos.
-    with get_conn() as conn:   #Primero busca con contraseña hasheada; si no coincide, intenta
-        cur = conn.cursor()                            # texto plano (compatibilidad con registros legacy del sistema anterior).
-        cur.execute("SELECT rol FROM usuarios WHERE usuario=%s AND password=%s", (u, hash_pw(p)))
+# ══════════════════════════════════════════════════════════════════════════════
+# FUNCIONES DE UTILIDAD
+# Pequeñas piezas reutilizables que usamos en varios puntos de la app
+# ══════════════════════════════════════════════════════════════════════════════
+
+def hash_pw(pw):
+    """Convierte una contraseña en texto plano a su hash SHA-256.
+    Nunca guardamos contraseñas en claro en la BD."""
+    return hashlib.sha256(pw.encode()).hexdigest()
+
+def login(u, p):
+    """Verifica credenciales contra la base de datos.
+    Primero busca con contraseña hasheada; si no coincide, intenta
+    texto plano (compatibilidad con registros legacy del sistema anterior)."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT rol FROM usuarios WHERE usuario=? AND password=?", (u, hash_pw(p)))
         res = cur.fetchone()
-        if not res:  # compatibilidad texto plano legacy
-            cur.execute("SELECT rol FROM usuarios WHERE usuario=%s AND password=%s", (u, p))
+        if not res:  # fallback para usuarios creados antes del hash
+            cur.execute("SELECT rol FROM usuarios WHERE usuario=? AND password=?", (u, p))
             res = cur.fetchone()
-    return res['rol'] if res else None  # devuelve el rol o None si falla
+    return res[0] if res else None  # devuelve el rol o None si falla
 
-def cargar_reglas(): #Trae todas las reglas de diagnóstico de la BD como un DataFrame.
+def cargar_reglas():
+    """Trae todas las reglas de diagnóstico de la BD como un DataFrame.
+    Las ordena por veces_exitosa para que las reglas más efectivas
+    aparezcan primero en la tabla del admin."""
     with get_conn() as conn:
         df = pd.read_sql_query(
             '''SELECT id, dtc, tipo_vehiculo, sintoma,
@@ -115,33 +149,45 @@ def cargar_reglas(): #Trae todas las reglas de diagnóstico de la BD como un Dat
                       protocolo_seguridad, origen, veces_exitosa
                FROM reglas_diagnostico
                ORDER BY veces_exitosa DESC, id DESC''', conn)
-    return df  #Las ordena por veces_exitosa para que las reglas más efectivas
-               #aparezcan primero en la tabla del admin.
+    return df
 
-def reset_sint(): #Limpia todo el estado del flujo de síntomas para empezar desde cero. en un diagnostico nuevo
+def reset_sint():
+    """Limpia todo el estado del flujo de síntomas para empezar desde cero.
+    Se llama cuando el técnico quiere hacer un diagnóstico nuevo."""
     st.session_state.update({'paso_sint':0,'sint_actual':'','sint_res':None,'sint_inicio':0})
 
-def reset_diag(): #Igual que reset_sint pero para el flujo de DTC"
+def reset_diag():
+    """Igual que reset_sint pero para el flujo de DTC."""
     st.session_state.update({'paso_diag':0,'dtc_actual':'','dtc_inicio':0})
 
-def duracion_desde(ts): #Calcula cuántos segundos pasaron desde que empezó el diagnóstico.
-                        #Esto alimenta la estadística de 'tiempo promedio de diagnóstico'.
+def duracion_desde(ts):
+    """Calcula cuántos segundos pasaron desde que empezó el diagnóstico.
+    Esto alimenta la estadística de 'tiempo promedio de diagnóstico'."""
     return int(time.time() - ts) if ts else 0
 
-# ── Generador de PDF ──────────────────────────────────────────
-def _pdf_texto(val) -> str: #Sanitiza cualquier valor antes de mandarlo a FPDF.
-    """Convierte cualquier valor a texto seguro para FPDF (sin None, sin caracteres raros)."""
 
-     # Primero nos aseguramos de que no llegue nada vacío o nulo
+# ══════════════════════════════════════════════════════════════════════════════
+# GENERADOR DE REPORTES PDF
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _pdf_texto(val) -> str:
+    """Sanitiza cualquier valor antes de mandarlo a FPDF.
+
+    FPDF usa la codificación latin-1 internamente. Si le pasamos None,
+    texto vacío, o caracteres unicode fuera de ese rango (tildes, ñ, comillas
+    tipográficas), lanza FPDFException. Esta función previene eso.
+    """
+    # Primero nos aseguramos de que no llegue nada vacío o nulo
     if val is None or str(val).strip() in ("", "None", "nan"):
         return "No especificado"
     texto = str(val)
+
     # Reemplazamos caracteres especiales por sus equivalentes ASCII seguros.
     # Helvetica (la fuente que usamos) no renderiza unicode fuera de latin-1.
-     # vocales con tilde → sin tilde
     replacements = {
         "\u2019": "'", "\u2018": "'", "\u201c": '"', "\u201d": '"',
         "\u2013": "-", "\u2014": "-", "\u2026": "...",
+        # vocales con tilde → sin tilde (el PDF es técnico, no literario)
         "\u00e1": "a", "\u00e9": "e", "\u00ed": "i",
         "\u00f3": "o", "\u00fa": "u", "\u00f1": "n",
         "\u00c1": "A", "\u00c9": "E", "\u00cd": "I",
@@ -150,22 +196,36 @@ def _pdf_texto(val) -> str: #Sanitiza cualquier valor antes de mandarlo a FPDF.
     }
     for orig, rep in replacements.items():
         texto = texto.replace(orig, rep)
+
     # Último recurso: forzar encoding latin-1, descartando lo que no entre
     try:
         texto.encode('latin-1')
     except (UnicodeEncodeError, Exception):
         texto = texto.encode('latin-1', errors='replace').decode('latin-1')
+
     return texto.strip() or "No especificado"
 
+
 def generar_pdf_diagnostico(datos: dict) -> bytes:
+    """Construye el reporte PDF del diagnóstico y lo devuelve como bytes.
+
+    Recibe un diccionario con los datos del caso (técnico, fecha, causa,
+    solución, etc.) y genera un PDF estructurado en dos secciones:
+    información general y resultado del diagnóstico.
+
+    Devuelve bytes para que Streamlit pueda ofrecerlo como descarga directa
+    sin necesidad de escribir archivos en disco.
+    """
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_auto_page_break(auto=True, margin=15) # salta página automáticamente si se llena
+    pdf.set_auto_page_break(auto=True, margin=15)  # salta página automáticamente si se llena
 
     # Calculamos el ancho útil de la página una sola vez.
     # En A4 son 210mm; con márgenes de ~10mm a cada lado quedan ~190mm.
+    # Usamos esta variable en vez de hardcodear "190" para que funcione
+    # aunque cambiemos los márgenes en el futuro.
     ANCHO = pdf.w - pdf.l_margin - pdf.r_margin   # ≈ 190mm
-    LABEL_W = 52    # ancho fijo de la columna de etiquetas ejemplo: "Tecnico:", "Fecha:"
+    LABEL_W = 52   # ancho fijo de la columna de etiquetas (ej: "Tecnico:", "Fecha:")
 
     # — Encabezado con fondo oscuro —
     pdf.set_fill_color(30, 30, 50)
@@ -174,7 +234,7 @@ def generar_pdf_diagnostico(datos: dict) -> bytes:
     pdf.cell(ANCHO, 13, "EXPERT-AUTO POPAYAN", ln=True, align="C", fill=True)
     pdf.set_font("Helvetica", "", 10)
     pdf.cell(ANCHO, 8, "Reporte de Diagnostico Automotriz", ln=True, align="C", fill=True)
-    pdf.ln(4) # espacio vertical
+    pdf.ln(4)  # espacio vertical
 
     # — Sección: Información General —
     pdf.set_text_color(0, 0, 0)
@@ -183,7 +243,7 @@ def generar_pdf_diagnostico(datos: dict) -> bytes:
     pdf.cell(ANCHO, 9, "INFORMACION GENERAL", ln=True, fill=True)
 
     # Lista de campos que vamos a imprimir en formato "Etiqueta: Valor"
-    campos = [ 
+    campos = [
         ("Tecnico",          datos.get("usuario",    "---")),
         ("Fecha / Hora",     datos.get("fecha",      "---")),
         ("Tipo de vehiculo", datos.get("tecnologia", "---")),
@@ -192,8 +252,7 @@ def generar_pdf_diagnostico(datos: dict) -> bytes:
         ("Duracion",         datos.get("duracion",   "---")),
     ]
     for label, val in campos:
-         # Imprimimos la etiqueta en negrita con ancho fijo
-        y_antes = pdf.get_y()
+        # Imprimimos la etiqueta en negrita con ancho fijo
         pdf.set_font("Helvetica", "B", 10)
         pdf.cell(LABEL_W, 7, f"{label}:", border=0)
         # multi_cell con ancho EXPLÍCITO (ANCHO - LABEL_W) evita el error
@@ -218,9 +277,8 @@ def generar_pdf_diagnostico(datos: dict) -> bytes:
     for label, val in secciones:
         pdf.set_font("Helvetica", "B", 10)
         pdf.cell(ANCHO, 7, f"{label}:", ln=True)
-        pdf.set_font("Helvetica", "", 9) # fuente 9pt = más texto cabe horizontalmente
+        pdf.set_font("Helvetica", "", 9)          # fuente 9pt = más texto cabe horizontalmente
         pdf.set_fill_color(250, 250, 255)
-        # Ancho explícito — nunca 0 para evitar el error de espacio
         pdf.multi_cell(ANCHO, 6, _pdf_texto(val), border=1, fill=True)
         pdf.ln(2)
 
@@ -236,15 +294,17 @@ def generar_pdf_diagnostico(datos: dict) -> bytes:
     # pdf.output() devuelve bytearray; lo convertimos a bytes para st.download_button
     return bytes(pdf.output())
 
-# ── Barra de confianza visual ─────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COMPONENTE VISUAL: BARRA DE CONFIANZA
 # Se usa en el modo de diagnóstico por síntomas para mostrarle al técnico
 # cuán seguro está el sistema de su recomendación
+# ══════════════════════════════════════════════════════════════════════════════
 def mostrar_confianza(pct: int):
-    #Renderiza una barra de progreso coloreada con el porcentaje de confianza.
-    #Verde >= 70%, Amarillo >= 40%, Rojo < 40%.
-    #El porcentaje lo calcula el motor de inferencia según cuántas palabras
-    #del síntoma ingresado coincidieron con las reglas de la BD.
-
+    """Renderiza una barra de progreso coloreada con el porcentaje de confianza.
+    Verde >= 70%, Amarillo >= 40%, Rojo < 40%.
+    El porcentaje lo calcula el motor de inferencia según cuántas palabras
+    del síntoma ingresado coincidieron con las reglas de la BD."""
     color = "#4CAF50" if pct >= 70 else "#FFC107" if pct >= 40 else "#F44336"
     label = "Alta" if pct >= 70 else "Media" if pct >= 40 else "Baja"
     st.markdown(f"""
@@ -257,19 +317,23 @@ def mostrar_confianza(pct: int):
     </div>
     """, unsafe_allow_html=True)
 
-# ══════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════════════════
 # PANTALLA DE LOGIN
 # Si nadie está autenticado, mostramos solo el formulario de acceso.
-# ══════════════════════════════════════════════════════════════
+# El bloque principal de la app vive en el 'else' de esta condición.
+# ══════════════════════════════════════════════════════════════════════════════
 if not st.session_state.logueado:
     st.title("🛡️ Acceso al Sistema Experto Automotriz")
     col_img, col_form = st.columns([1, 1])
+
     with col_img:
-         # Imagen decorativa del login. Si no existe el archivo, mostramos un aviso.
+        # Imagen decorativa del login. Si no existe el archivo, mostramos un aviso.
         try:
             st.image("autosLogin.jpg", use_container_width=True)
         except:
             st.info("📷 Coloca 'autosLogin.jpg' en la raíz del proyecto")
+
     with col_form:
         st.markdown("### Ingresa tus credenciales")
         # st.form agrupa los inputs y solo dispara el submit cuando el usuario
@@ -286,16 +350,18 @@ if not st.session_state.logueado:
                 else:
                     st.error("Credenciales incorrectas")
 
-# ══════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════════════════
 # INTERFAZ PRINCIPAL (usuario autenticado)
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 else:
-    # ── BARRA LATERAL ───────────────────────────────────────────────
+
+    # ── BARRA LATERAL ─────────────────────────────────────────────────────────
     # Siempre visible después del login. Muestra quién está conectado,
     # su actividad personal y el botón de cerrar sesión.
     with st.sidebar:
+        # Logo del taller — opcional, si no existe mostramos texto
         try:
-            # Logo del taller, si no existe mostramos texto
             st.image("logo_taller.png", use_container_width=True)
         except:
             st.markdown("## ⚙️ EXPERT-AUTO")
@@ -316,11 +382,11 @@ else:
 
         st.write("")
 
-         # Mini resumen de actividad personal: cuántos diagnósticos hizo este usuario
+        # Mini resumen de actividad personal: cuántos diagnósticos hizo este usuario
         # y cuántos resultaron exitosos. Solo aparece si ya tiene registros.
         with get_conn() as conn:
             mis_diag = pd.read_sql_query(
-                "SELECT resultado FROM estadisticas WHERE usuario=%s",
+                "SELECT resultado FROM estadisticas WHERE usuario=?",
                 conn, params=(st.session_state.user,))
         if not mis_diag.empty:
             total_yo = len(mis_diag)
@@ -334,14 +400,14 @@ else:
             </div>
             """, unsafe_allow_html=True)
             st.write("")
-            
-            # Cerrar sesión: borra todo session_state y vuelve al login
+
+        # Cerrar sesión: borra todo session_state y vuelve al login
         if st.button("🚨 Cerrar Sesión", use_container_width=True, type="primary"):
             for k in list(st.session_state.keys()):
                 st.session_state.pop(k, None)
             st.rerun()
 
-    # ── PESTAÑAS DE NAVEGACIÓN ──────────────────────────────────────────────
+    # ── PESTAÑAS DE NAVEGACIÓN ────────────────────────────────────────────────
     # El administrador ve todas las pestañas.
     # El mecánico solo ve Diagnóstico: no tiene acceso a la gestión del sistema.
     if st.session_state.rol == "Administrador":
@@ -352,11 +418,12 @@ else:
 
     tabs = st.tabs(nombres_tabs)
 
-    # ══════════════════════════════════════════════════════════
+
+    # ══════════════════════════════════════════════════════════════════════════
     # PESTAÑA 0 — DIAGNÓSTICO
     # El corazón del sistema. Aquí el técnico ingresa el código DTC o describe
     # los síntomas, y el motor de inferencia le guía por el árbol de decisión.
-    # ══════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════════
     with tabs[0]:
         st.header("🔍 Motor de Inferencia")
 
@@ -365,7 +432,6 @@ else:
         # en session_state. En el siguiente render (después del rerun) lo mostramos aquí.
         # No podemos mostrarlo en el mismo render donde se generó porque reset_diag()
         # ya borró los datos del código DTC/síntoma antes del rerun.
-
         if st.session_state.get('pdf_bytes') and st.session_state.get('diag_mensaje'):
             st.success(st.session_state.diag_mensaje)
             st.download_button(
@@ -389,7 +455,8 @@ else:
         metodo = st.radio("Método de entrada:", ["DTC (Escáner)", "Síntomas (Texto)"], horizontal=True)
         tipo_v = st.selectbox("Motorización", ["Combustión", "Híbrido", "Eléctrico"])
 
-        # ── MODO DTC ───────────────────────────────────────────────
+
+        # ── MODO DTC ──────────────────────────────────────────────────────────
         if metodo == "DTC (Escáner)":
             codigo = st.text_input("Ingrese código DTC (ej: P0300)").upper().strip()
             c1, c2 = st.columns([1, 4])
@@ -399,8 +466,9 @@ else:
             if c1.button("🔎 Analizar DTC"):
                 st.session_state.paso_diag  = 1
                 st.session_state.dtc_actual = codigo
-                st.session_state.dtc_inicio = time.time() # empezamos a medir el tiemp
+                st.session_state.dtc_inicio = time.time()  # empezamos a medir el tiempo
                 st.rerun()
+
             if c2.button("🗑️ Limpiar"):
                 reset_diag(); st.rerun()
 
@@ -408,21 +476,21 @@ else:
             if st.session_state.paso_diag >= 1 and st.session_state.dtc_actual:
                 res = motor.consultar_por_dtc(st.session_state.dtc_actual, tipo_v)
 
-                # El protocolo de seguridad se muestra siempre, antes que cualquier
-                # instrucción de diagnóstico. Esto es obligatorio para vehículos
-                # con sistemas de alta tensión (híbridos y eléctricos).
                 if res["encontrado"]:
+                    # El protocolo de seguridad se muestra siempre, antes que cualquier
+                    # instrucción de diagnóstico. Esto es obligatorio para vehículos
+                    # con sistemas de alta tensión (híbridos y eléctricos).
                     st.warning(f"🛑 **SEGURIDAD:** {res['seguridad']}")
 
                     # — PASO 1: Primera hipótesis (causa más probable) —
                     if st.session_state.paso_diag == 1:
                         st.info(f"**Causa 1:** {res['causa_p']}\n\n**Solución 1:** {res['solucion_p']}")
                         col1, col2 = st.columns(2)
+
                         if col1.button("✅ Resolvió el problema"):
                             # El técnico confirma que la solución funcionó.
                             # Registramos el éxito en estadísticas e historial,
                             # generamos el PDF y preparamos el banner de descarga.
-
                             dur = duracion_desde(st.session_state.dtc_inicio)
                             motor.registrar_estadistica(
                                 st.session_state.dtc_actual, "DTC", tipo_v,
@@ -441,13 +509,12 @@ else:
                                 "seguridad": res['seguridad'],
                                 "resultado": "Resuelto en 1er intento"
                             }
-
                             # Guardamos el PDF en session_state ANTES del rerun
                             # para que el banner pueda mostrarlo en el siguiente render
                             st.session_state.pdf_bytes    = generar_pdf_diagnostico(datos_pdf)
                             st.session_state.pdf_filename = f"diagnostico_{st.session_state.dtc_actual}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
                             st.session_state.diag_mensaje = "✅ Diagnóstico exitoso registrado. Descarga el reporte abajo."
-                            reset_diag() # limpiamos el flujo activo
+                            reset_diag()   # limpiamos el flujo activo
                             st.rerun()
 
                         if col2.button("❌ No funcionó"):
@@ -464,6 +531,7 @@ else:
                             # No todas las reglas tienen causa secundaria definida
                             st.warning("No hay causa secundaria registrada.")
                         col1, col2 = st.columns(2)
+
                         if col1.button("✅ Resolvió (Opción 2)"):
                             # Mismo flujo que el paso 1 pero registramos "2do Intento"
                             dur = duracion_desde(st.session_state.dtc_inicio)
@@ -491,14 +559,13 @@ else:
                             st.rerun()
 
                         if col2.button("❌ Tampoco funcionó"):
-                             # Se agotaron ambas hipótesis. Pasamos al reporte.
+                            # Se agotaron ambas hipótesis. Pasamos al reporte.
                             st.session_state.paso_diag = 3; st.rerun()
 
                     # — PASO 3: El sistema no pudo resolver el caso —
                     # El técnico describe el problema y lo envía como reporte
                     # pendiente para que el administrador lo estudie y enseñe
                     # la solución al sistema (módulo de aprendizaje).
-
                     elif st.session_state.paso_diag == 3:
                         st.warning("⚠️ Se agotaron las soluciones. Envía el caso al experto.")
                         obs = st.text_area("Describe el problema con detalle:")
@@ -512,11 +579,11 @@ else:
                     # El código DTC no existe en nuestra base de conocimiento
                     st.error("❌ Código DTC no encontrado en la base de datos.")
 
+
         # ── MODO SÍNTOMAS ─────────────────────────────────────────────────────
         # El técnico describe la falla con sus propias palabras.
         # El motor expande esas palabras con sinónimos técnicos automotrices
         # y busca la regla con más coincidencias en la BD.
-
         else:
             sint = st.text_input("Describa la falla física (ej: 'motor pierde potencia y humo negro')")
             col_a, col_b = st.columns([1, 4])
@@ -558,11 +625,12 @@ else:
             # — PASO 1: Causa principal —
             elif st.session_state.paso_sint == 1:
                 r = st.session_state.sint_res
-                mostrar_confianza(r["confianza"]) # barra de porcentaje de coincidencia
+                mostrar_confianza(r["confianza"])   # barra de porcentaje de coincidencia
                 seguridad = r["seguridad"] or "Sigue los protocolos estándar"
                 st.warning(f"🛑 **SEGURIDAD:** {seguridad}")
                 st.info(f"**Causa 1:** {r['causa_p']}\n\n**Solución 1:** {r['solucion_p']}")
                 col1, col2 = st.columns(2)
+
                 if col1.button("✅ Resolvió el problema", key="sint_ok1"):
                     dur = duracion_desde(st.session_state.sint_inicio)
                     motor.registrar_estadistica(
@@ -574,7 +642,6 @@ else:
                         r['causa_p'], r['solucion_p'], "Acierto 1er Intento")
                     # Además incrementamos el contador de éxitos de esta regla específica.
                     # Así las reglas más efectivas suben en el ranking de la BD.
-
                     if r.get("id"):
                         motor.registrar_exito_regla(r["id"])
                     datos_pdf = {
@@ -606,6 +673,7 @@ else:
                 else:
                     st.warning("No hay causa secundaria registrada.")
                 col1, col2 = st.columns(2)
+
                 if col1.button("✅ Resolvió (Opción 2)", key="sint_ok2"):
                     dur = duracion_desde(st.session_state.sint_inicio)
                     motor.registrar_estadistica(
@@ -645,10 +713,11 @@ else:
                     st.success("Reporte enviado. ¡Gracias por la retroalimentación!")
                     reset_sint(); st.rerun()
 
-    # ══════════════════════════════════════════════════════════
+
+    # ══════════════════════════════════════════════════════════════════════════
     # PESTAÑAS EXCLUSIVAS DEL ADMINISTRADOR
     # Solo el rol "Administrador" puede ver y usar lo que viene a continuación
-    # ══════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════════
     if st.session_state.rol == "Administrador":
 
         # ── PESTAÑA 1 — BASE DE CONOCIMIENTO ──────────────────────────────────
@@ -673,16 +742,16 @@ else:
 
             # — Añadir nueva regla manualmente —
             with sub1:
-                 # clear_on_submit=True limpia los campos después de guardar
+                # clear_on_submit=True limpia los campos después de guardar
                 with st.form("add_form", clear_on_submit=True):
                     c1, c2 = st.columns(2)
-                    n_dtc  = c1.text_input("DTC").upper()  # siempre en mayúsculas
+                    n_dtc  = c1.text_input("DTC").upper()    # siempre en mayúsculas
                     n_tec  = c1.selectbox("Tecnología", ["Combustión","Híbrido","Eléctrico"])
                     n_sin  = c2.text_area("Síntoma")
                     n_cp   = st.text_area("Causa 1")
                     n_sp   = st.text_area("Solución 1")
-                    n_cs   = st.text_area("Causa 2")       # opcional
-                    n_ss   = st.text_area("Solución 2")    # opcional
+                    n_cs   = st.text_area("Causa 2")          # opcional
+                    n_ss   = st.text_area("Solución 2")       # opcional
                     n_prot = st.text_input("Protocolo de Seguridad")
                     if st.form_submit_button("💾 Guardar"):
                         with get_conn() as conn:
@@ -690,10 +759,9 @@ else:
                                 '''INSERT INTO reglas_diagnostico
                                    (dtc,tipo_vehiculo,sintoma,causa_principal,solucion_principal,
                                     causa_secundaria,solucion_secundaria,protocolo_seguridad)
-                                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)''',
+                                   VALUES (?,?,?,?,?,?,?,?)''',
                                 (n_dtc,n_tec,n_sin,n_cp,n_sp,n_cs,n_ss,n_prot))
                         st.success("Regla guardada."); st.rerun()
-
 
             # — Editar una regla existente —
             with sub2:
@@ -705,7 +773,7 @@ else:
                     id_ed = st.selectbox("ID a editar", df_edit['id'], key="sel_editar")
                     with get_conn() as conn:
                         cur = conn.cursor()
-                        cur.execute("SELECT * FROM reglas_diagnostico WHERE id=%s", (id_ed,))
+                        cur.execute("SELECT * FROM reglas_diagnostico WHERE id=?", (id_ed,))
                         data = cur.fetchone()
                     if data:
                         # Precargamos el formulario con los valores actuales de la regla
@@ -739,10 +807,11 @@ else:
                     conf = st.checkbox(f"✅ Confirmo eliminar permanentemente la regla ID {id_el}")
                     if st.button("🗑️ Eliminar", type="primary", disabled=not conf):
                         with get_conn() as conn:
-                            conn.execute("DELETE FROM reglas_diagnostico WHERE id=%s", (id_el,))
+                            conn.execute("DELETE FROM reglas_diagnostico WHERE id=?", (id_el,))
                         st.success(f"Regla {id_el} eliminada."); st.rerun()
                 else:
                     st.info("No hay reglas registradas.")
+
 
         # ── PESTAÑA 2 — RESOLVER REPORTES + APRENDIZAJE ───────────────────────
         # Aquí el admin estudia los casos que los técnicos no pudieron resolver
@@ -751,6 +820,7 @@ else:
         # crece con cada caso nuevo que se presente en el taller.
         with tabs[2]:
             st.header("🛠️ Reportes Pendientes")
+
             # Traemos solo los casos que aún no han sido resueltos
             with get_conn() as conn:
                 pendientes = pd.read_sql_query(
@@ -761,6 +831,7 @@ else:
                 st.divider()
                 st.subheader("🤖 Resolver y Enseñar al Sistema")
                 st.caption("Al completar los campos y guardar, el sistema aprende automáticamente y crea una nueva regla.")
+
                 # El admin selecciona cuál reporte quiere resolver
                 id_res = st.selectbox("Seleccionar reporte:", pendientes['id'])
                 fila_rep = pendientes[pendientes['id'] == id_res].iloc[0]
@@ -773,6 +844,7 @@ else:
                 solucion_r = c2.text_area("✏️ Solución que funcionó:")
 
                 col_ap, col_el = st.columns(2)
+
                 if col_ap.button("🧠 Resolver y Enseñar al Sistema", type="primary"):
                     if causa_r and solucion_r:
                         # resolver_caso_pendiente hace dos cosas:
@@ -781,7 +853,7 @@ else:
                         ok = motor.resolver_caso_pendiente(int(id_res), causa_r, solucion_r)
                         if ok:
                             st.success("✅ Reporte resuelto. ¡Nueva regla añadida automáticamente a la base de conocimiento!")
-                            st.balloons() # celebración visual
+                            st.balloons()  # celebración visual
                             st.rerun()
                     else:
                         st.error("Debes completar causa y solución para enseñar al sistema.")
@@ -803,12 +875,14 @@ else:
             else:
                 st.info("Aún no hay reportes resueltos.")
 
+
         # ── PESTAÑA 3 — ESTADÍSTICAS ───────────────────────────────────────────
         # Análisis cuantitativo del desempeño del sistema.
         # Estos datos alimentan la sección de resultados de la tesis:
         # tasa de acierto, fallas más frecuentes, tiempo promedio de diagnóstico.
         with tabs[3]:
             st.header("📈 Análisis de Diagnósticos")
+
             # Traemos todos los registros de la tabla de estadísticas
             with get_conn() as conn:
                 stats = pd.read_sql_query("SELECT * FROM estadisticas", conn)
@@ -882,7 +956,7 @@ else:
                         title='Diagnósticos por Día', markers=True)
                     st.plotly_chart(fig, use_container_width=True)
                 except Exception:
-                    pass # si las fechas están mal formateadas, omitimos esta gráfica
+                    pass  # si las fechas están mal formateadas, omitimos esta gráfica
 
                 # — Tiempo promedio por tipo de resultado —
                 if col_dur in stats.columns:
@@ -909,6 +983,7 @@ else:
                     st.dataframe(stats, use_container_width=True, height=300)
             else:
                 st.info("Aún no hay datos para mostrar.")
+
 
         # ── PESTAÑA 4 — DASHBOARD DE VALIDACIÓN (Sprint 4) ────────────────────
         # Vista diseñada específicamente para las pruebas con los 6 técnicos.
@@ -947,7 +1022,6 @@ else:
                 dias   = rangos[rango]
                 if dias < 9999:
                     desde = ahora - timedelta(days=dias)
-                    # Comparar sin timezone
                     hist = hist[hist['fecha_dt'].dt.tz_localize(None) >= desde]
                 if tec_sel != "Todos":
                     hist = hist[hist['usuario'] == tec_sel]
@@ -1016,14 +1090,18 @@ else:
             else:
                 # Si el historial está vacío, verificamos si es por el filtro o porque no hay datos
                 with get_conn() as _conn:
-                    _total_hist = pd.read_sql_query("SELECT COUNT(*) as c FROM historial_diagnosticos", _conn).iloc[0]['c']
+                    _cur = _conn.cursor()
+                    _cur.execute("SELECT COUNT(*) as c FROM historial_diagnosticos")
+                    _total_hist = int(_cur.fetchone()['c'])
                 if _total_hist > 0:
-                # Hay datos pero el filtro activo los está ocultando
-                    st.warning(f"⚠️ Hay **{_total_hist} diagnóstico(s)** en la BD pero el filtro actual no muestra ninguno. Cambia el período a **'Todo'** o selecciona **'Todos'** los técnicos.")
+                    # Hay datos pero el filtro activo los está ocultando
+                    st.warning(f"⚠️ Hay **{_total_hist} diagnóstico(s)** en la BD pero el filtro actual no muestra ninguno. "
+                               f"Cambia el período a **'Todo'** o selecciona **'Todos'** los técnicos.")
                 else:
                     # La tabla realmente está vacía: nadie ha hecho diagnósticos aún
                     st.info("Aún no hay diagnósticos registrados en el historial.")
                     st.caption("Los diagnósticos aparecen aquí automáticamente cuando los técnicos usen el sistema.")
+
 
         # ── PESTAÑA 5 — GESTIÓN DE USUARIOS ───────────────────────────────────
         # El administrador puede crear cuentas nuevas (mecánicos u otros admins)
@@ -1045,10 +1123,10 @@ else:
                         with get_conn() as conn:
                             try:
                                 conn.execute(
-                                    "INSERT INTO usuarios (usuario,password,rol) VALUES (%s,%s,%s)",
+                                    "INSERT INTO usuarios (usuario,password,rol) VALUES (?,?,?)",
                                     (u_n, hash_pw(u_p), u_r))  # contraseña siempre hasheada
                                 st.success(f"Usuario '{u_n}' creado.")
-                            except sqlite3.IntegrityError:
+                            except Exception:
                                 # La columna 'usuario' tiene restricción UNIQUE en la BD
                                 st.error("Ese usuario ya existe.")
 
@@ -1067,7 +1145,7 @@ else:
                             st.error("No puedes eliminar tu propia cuenta activa.")
                         else:
                             with get_conn() as conn:
-                                conn.execute("DELETE FROM usuarios WHERE usuario=%s", (usr_b,))
+                                conn.execute("DELETE FROM usuarios WHERE usuario=?", (usr_b,))
                             st.success(f"Usuario '{usr_b}' eliminado.")
                             st.rerun()
                 else:
