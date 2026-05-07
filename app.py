@@ -1,5 +1,4 @@
 import streamlit as st   # el framework que convierte este script en una app web
-import sqlite3           # acceso directo a la base de datos SQLite
 import hashlib           # para cifrar contraseñas con SHA-256
 import time              # medir duración de los diagnósticos en segundos
 import io                # manejo de flujos de bytes (para el PDF en memoria)
@@ -9,6 +8,8 @@ import plotly.graph_objects as go     # gráficas con más control manual
 from datetime import datetime, timedelta   # fechas y cálculo de rangos temporales
 from fpdf import FPDF                       # generación del reporte PDF descargable
 from inference_engine import MotorInferencia  # nuestro motor de reglas lógicas
+from database import get_conn, inicializar_bd
+inicializar_bd()  # Aseguramos que la base de datos y sus tablas existan antes de arrancar la app
  
 # ══════════════════════════════════════════════════════════════
 # CONFIGURACIÓN
@@ -96,17 +97,17 @@ def hash_pw(pw): return hashlib.sha256(pw.encode()).hexdigest() #Convierte una c
 # Nunca guardamos contraseñas en la BD
 
 def login(u, p): #Verifica credenciales contra la base de datos.
-    with sqlite3.connect('conocimiento.db') as conn:   #Primero busca con contraseña hasheada; si no coincide, intenta
+    with get_conn() as conn:   #Primero busca con contraseña hasheada; si no coincide, intenta
         cur = conn.cursor()                            # texto plano (compatibilidad con registros legacy del sistema anterior).
-        cur.execute("SELECT rol FROM usuarios WHERE usuario=? AND password=?", (u, hash_pw(p)))
+        cur.execute("SELECT rol FROM usuarios WHERE usuario=%s AND password=%s", (u, hash_pw(p)))
         res = cur.fetchone()
         if not res:  # compatibilidad texto plano legacy
-            cur.execute("SELECT rol FROM usuarios WHERE usuario=? AND password=?", (u, p))
+            cur.execute("SELECT rol FROM usuarios WHERE usuario=%s AND password=%s", (u, p))
             res = cur.fetchone()
-    return res[0] if res else None  # devuelve el rol o None si falla
+    return res['rol'] if res else None  # devuelve el rol o None si falla
 
 def cargar_reglas(): #Trae todas las reglas de diagnóstico de la BD como un DataFrame.
-    with sqlite3.connect('conocimiento.db') as conn:
+    with get_conn() as conn:
         df = pd.read_sql_query(
             '''SELECT id, dtc, tipo_vehiculo, sintoma,
                       causa_principal, solucion_principal,
@@ -317,9 +318,9 @@ else:
 
          # Mini resumen de actividad personal: cuántos diagnósticos hizo este usuario
         # y cuántos resultaron exitosos. Solo aparece si ya tiene registros.
-        with sqlite3.connect('conocimiento.db') as conn:
+        with get_conn() as conn:
             mis_diag = pd.read_sql_query(
-                "SELECT resultado FROM estadisticas WHERE usuario=?",
+                "SELECT resultado FROM estadisticas WHERE usuario=%s",
                 conn, params=(st.session_state.user,))
         if not mis_diag.empty:
             total_yo = len(mis_diag)
@@ -684,12 +685,12 @@ else:
                     n_ss   = st.text_area("Solución 2")    # opcional
                     n_prot = st.text_input("Protocolo de Seguridad")
                     if st.form_submit_button("💾 Guardar"):
-                        with sqlite3.connect('conocimiento.db') as conn:
+                        with get_conn() as conn:
                             conn.execute(
                                 '''INSERT INTO reglas_diagnostico
                                    (dtc,tipo_vehiculo,sintoma,causa_principal,solucion_principal,
                                     causa_secundaria,solucion_secundaria,protocolo_seguridad)
-                                   VALUES (?,?,?,?,?,?,?,?)''',
+                                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)''',
                                 (n_dtc,n_tec,n_sin,n_cp,n_sp,n_cs,n_ss,n_prot))
                         st.success("Regla guardada."); st.rerun()
 
@@ -702,9 +703,9 @@ else:
                 else:
                     # El admin selecciona la regla por ID
                     id_ed = st.selectbox("ID a editar", df_edit['id'], key="sel_editar")
-                    with sqlite3.connect('conocimiento.db') as conn:
+                    with get_conn() as conn:
                         cur = conn.cursor()
-                        cur.execute("SELECT * FROM reglas_diagnostico WHERE id=?", (id_ed,))
+                        cur.execute("SELECT * FROM reglas_diagnostico WHERE id=%s", (id_ed,))
                         data = cur.fetchone()
                     if data:
                         # Precargamos el formulario con los valores actuales de la regla
@@ -737,8 +738,8 @@ else:
                     # Requerimos confirmación explícita antes de borrar
                     conf = st.checkbox(f"✅ Confirmo eliminar permanentemente la regla ID {id_el}")
                     if st.button("🗑️ Eliminar", type="primary", disabled=not conf):
-                        with sqlite3.connect('conocimiento.db') as conn:
-                            conn.execute("DELETE FROM reglas_diagnostico WHERE id=?", (id_el,))
+                        with get_conn() as conn:
+                            conn.execute("DELETE FROM reglas_diagnostico WHERE id=%s", (id_el,))
                         st.success(f"Regla {id_el} eliminada."); st.rerun()
                 else:
                     st.info("No hay reglas registradas.")
@@ -751,7 +752,7 @@ else:
         with tabs[2]:
             st.header("🛠️ Reportes Pendientes")
             # Traemos solo los casos que aún no han sido resueltos
-            with sqlite3.connect('conocimiento.db') as conn:
+            with get_conn() as conn:
                 pendientes = pd.read_sql_query(
                     "SELECT * FROM casos_pendientes WHERE resuelto=0", conn)
             st.dataframe(pendientes, use_container_width=True, height=260)
@@ -794,7 +795,7 @@ else:
             # Historial de lo que ya se resolvió anteriormente
             st.divider()
             st.subheader("📋 Historial de Reportes Resueltos")
-            with sqlite3.connect('conocimiento.db') as conn:
+            with get_conn() as conn:
                 resueltos = pd.read_sql_query(
                     "SELECT * FROM casos_pendientes WHERE resuelto=1 ORDER BY fecha DESC", conn)
             if not resueltos.empty:
@@ -809,7 +810,7 @@ else:
         with tabs[3]:
             st.header("📈 Análisis de Diagnósticos")
             # Traemos todos los registros de la tabla de estadísticas
-            with sqlite3.connect('conocimiento.db') as conn:
+            with get_conn() as conn:
                 stats = pd.read_sql_query("SELECT * FROM estadisticas", conn)
 
             if not stats.empty:
@@ -924,7 +925,7 @@ else:
                 st.rerun()
 
             # Cargamos el historial detallado (uno por diagnóstico) y las estadísticas agregadas
-            with sqlite3.connect('conocimiento.db') as conn:
+            with get_conn() as conn:
                 hist = pd.read_sql_query(
                     "SELECT * FROM historial_diagnosticos ORDER BY fecha DESC", conn)
                 stats_val = pd.read_sql_query("SELECT * FROM estadisticas", conn)
@@ -1014,7 +1015,7 @@ else:
                 )
             else:
                 # Si el historial está vacío, verificamos si es por el filtro o porque no hay datos
-                with sqlite3.connect('conocimiento.db') as _conn:
+                with get_conn() as _conn:
                     _total_hist = pd.read_sql_query("SELECT COUNT(*) as c FROM historial_diagnosticos", _conn).iloc[0]['c']
                 if _total_hist > 0:
                 # Hay datos pero el filtro activo los está ocultando
@@ -1041,10 +1042,10 @@ else:
                     u_p = c2.text_input("Contraseña", type="password")
                     u_r = c3.selectbox("Rol", ["Mecanico","Administrador"])
                     if st.form_submit_button("Crear"):
-                        with sqlite3.connect('conocimiento.db') as conn:
+                        with get_conn() as conn:
                             try:
                                 conn.execute(
-                                    "INSERT INTO usuarios (usuario,password,rol) VALUES (?,?,?)",
+                                    "INSERT INTO usuarios (usuario,password,rol) VALUES (%s,%s,%s)",
                                     (u_n, hash_pw(u_p), u_r))  # contraseña siempre hasheada
                                 st.success(f"Usuario '{u_n}' creado.")
                             except sqlite3.IntegrityError:
@@ -1053,7 +1054,7 @@ else:
 
             # — Eliminar usuario existente —
             with sub_eliminar:
-                with sqlite3.connect('conocimiento.db') as conn:
+                with get_conn() as conn:
                     df_usr = pd.read_sql_query("SELECT id,usuario,rol FROM usuarios", conn)
                 st.dataframe(df_usr, use_container_width=True, height=220)
                 if not df_usr.empty:
@@ -1065,8 +1066,8 @@ else:
                             # Protección: no puedes borrarte a ti mismo estando activo
                             st.error("No puedes eliminar tu propia cuenta activa.")
                         else:
-                            with sqlite3.connect('conocimiento.db') as conn:
-                                conn.execute("DELETE FROM usuarios WHERE usuario=?", (usr_b,))
+                            with get_conn() as conn:
+                                conn.execute("DELETE FROM usuarios WHERE usuario=%s", (usr_b,))
                             st.success(f"Usuario '{usr_b}' eliminado.")
                             st.rerun()
                 else:
