@@ -1,6 +1,6 @@
 # ══════════════════════════════════════════════════════════════════════════════
 # EXPERT-AUTO POPAYÁN — Sistema Experto de Diagnóstico Automotriz
-# Desarrollado con Python + Streamlit + SQLite
+# Desarrollado con Python + Streamlit + Supabase
 #
 # Este archivo es el punto de entrada principal de la aplicación.
 # Aquí vive toda la interfaz de usuario: login, diagnóstico, administración
