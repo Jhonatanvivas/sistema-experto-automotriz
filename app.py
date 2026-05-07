@@ -135,20 +135,27 @@ def login(u, p):
         if not res:  # fallback para usuarios creados antes del hash
             cur.execute("SELECT rol FROM usuarios WHERE usuario=%s AND password=%s", (u, p))
             res = cur.fetchone()
-    return res['rol'] if res else None  # devuelve el rol o None si falla
+    return res[0] if res else None  # devuelve el rol o None si falla
 
 def cargar_reglas():
     """Trae todas las reglas de diagnóstico de la BD como un DataFrame.
     Las ordena por veces_exitosa para que las reglas más efectivas
     aparezcan primero en la tabla del admin."""
     with get_conn() as conn:
-        df = pd.read_sql_query(
-            '''SELECT id, dtc, tipo_vehiculo, sintoma,
+        cur = conn.cursor()
+        cur.execute('''SELECT id, dtc, tipo_vehiculo, sintoma,
                       causa_principal, solucion_principal,
                       causa_secundaria, solucion_secundaria,
                       protocolo_seguridad, origen, veces_exitosa
                FROM reglas_diagnostico
-               ORDER BY veces_exitosa DESC, id DESC''', conn)
+               ORDER BY veces_exitosa DESC, id DESC''')
+        rows = cur.fetchall()
+    if rows:
+        df = pd.DataFrame([dict(r) for r in rows])
+    else:
+        df = pd.DataFrame(columns=['id','dtc','tipo_vehiculo','sintoma',
+            'causa_principal','solucion_principal','causa_secundaria',
+            'solucion_secundaria','protocolo_seguridad','origen','veces_exitosa'])
     return df
 
 def reset_sint():
@@ -385,9 +392,11 @@ else:
         # Mini resumen de actividad personal: cuántos diagnósticos hizo este usuario
         # y cuántos resultaron exitosos. Solo aparece si ya tiene registros.
         with get_conn() as conn:
-            mis_diag = pd.read_sql_query(
-                "SELECT resultado FROM estadisticas WHERE usuario=%s",
-                conn, params=(st.session_state.user,))
+            cur = conn.cursor()
+            cur.execute("SELECT resultado FROM estadisticas WHERE usuario=%s",
+                (st.session_state.user,))
+            rows = cur.fetchall()
+        mis_diag = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame(columns=['resultado'])
         if not mis_diag.empty:
             total_yo = len(mis_diag)
             exito_yo = int(mis_diag['resultado'].str.contains('Acierto', na=False).sum())
@@ -755,12 +764,14 @@ else:
                     n_prot = st.text_input("Protocolo de Seguridad")
                     if st.form_submit_button("💾 Guardar"):
                         with get_conn() as conn:
-                            conn.execute(
+                            cur = conn.cursor()
+                            cur.execute(
                                 '''INSERT INTO reglas_diagnostico
                                    (dtc,tipo_vehiculo,sintoma,causa_principal,solucion_principal,
                                     causa_secundaria,solucion_secundaria,protocolo_seguridad)
                                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)''',
                                 (n_dtc,n_tec,n_sin,n_cp,n_sp,n_cs,n_ss,n_prot))
+                            conn.commit()
                         st.success("Regla guardada."); st.rerun()
 
             # — Editar una regla existente —
@@ -807,7 +818,9 @@ else:
                     conf = st.checkbox(f"✅ Confirmo eliminar permanentemente la regla ID {id_el}")
                     if st.button("🗑️ Eliminar", type="primary", disabled=not conf):
                         with get_conn() as conn:
-                            conn.execute("DELETE FROM reglas_diagnostico WHERE id=%s", (id_el,))
+                            cur = conn.cursor()
+                            cur.execute("DELETE FROM reglas_diagnostico WHERE id=%s", (id_el,))
+                            conn.commit()
                         st.success(f"Regla {id_el} eliminada."); st.rerun()
                 else:
                     st.info("No hay reglas registradas.")
@@ -823,8 +836,10 @@ else:
 
             # Traemos solo los casos que aún no han sido resueltos
             with get_conn() as conn:
-                pendientes = pd.read_sql_query(
-                    "SELECT * FROM casos_pendientes WHERE resuelto=0", conn)
+                cur = conn.cursor()
+                cur.execute("SELECT * FROM casos_pendientes WHERE resuelto=0")
+                rows = cur.fetchall()
+            pendientes = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
             st.dataframe(pendientes, use_container_width=True, height=260)
 
             if not pendientes.empty:
@@ -868,8 +883,10 @@ else:
             st.divider()
             st.subheader("📋 Historial de Reportes Resueltos")
             with get_conn() as conn:
-                resueltos = pd.read_sql_query(
-                    "SELECT * FROM casos_pendientes WHERE resuelto=1 ORDER BY fecha DESC", conn)
+                cur = conn.cursor()
+                cur.execute("SELECT * FROM casos_pendientes WHERE resuelto=1 ORDER BY fecha DESC")
+                rows = cur.fetchall()
+            resueltos = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
             if not resueltos.empty:
                 st.dataframe(resueltos, use_container_width=True, height=200)
             else:
@@ -885,7 +902,10 @@ else:
 
             # Traemos todos los registros de la tabla de estadísticas
             with get_conn() as conn:
-                stats = pd.read_sql_query("SELECT * FROM estadisticas", conn)
+                cur = conn.cursor()
+                cur.execute("SELECT * FROM estadisticas")
+                rows = cur.fetchall()
+            stats = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
 
             if not stats.empty:
                 # Alias de columnas para no repetir strings largos en el código
@@ -1001,9 +1021,13 @@ else:
 
             # Cargamos el historial detallado (uno por diagnóstico) y las estadísticas agregadas
             with get_conn() as conn:
-                hist = pd.read_sql_query(
-                    "SELECT * FROM historial_diagnosticos ORDER BY fecha DESC", conn)
-                stats_val = pd.read_sql_query("SELECT * FROM estadisticas", conn)
+                cur = conn.cursor()
+                cur.execute("SELECT * FROM historial_diagnosticos ORDER BY fecha DESC")
+                rows_hist = cur.fetchall()
+                cur.execute("SELECT * FROM estadisticas")
+                rows_stats = cur.fetchall()
+            hist      = pd.DataFrame([dict(r) for r in rows_hist])  if rows_hist  else pd.DataFrame()
+            stats_val = pd.DataFrame([dict(r) for r in rows_stats]) if rows_stats else pd.DataFrame()
 
             if not hist.empty:
                 # — Filtros de visualización —
@@ -1122,18 +1146,23 @@ else:
                     if st.form_submit_button("Crear"):
                         with get_conn() as conn:
                             try:
-                                conn.execute(
+                                cur = conn.cursor()
+                                cur.execute(
                                     "INSERT INTO usuarios (usuario,password,rol) VALUES (%s,%s,%s)",
-                                    (u_n, hash_pw(u_p), u_r))  # contraseña siempre hasheada
+                                    (u_n, hash_pw(u_p), u_r))
+                                conn.commit()
                                 st.success(f"Usuario '{u_n}' creado.")
                             except Exception:
-                                # La columna 'usuario' tiene restricción UNIQUE en la BD
+                                conn.rollback()
                                 st.error("Ese usuario ya existe.")
 
             # — Eliminar usuario existente —
             with sub_eliminar:
                 with get_conn() as conn:
-                    df_usr = pd.read_sql_query("SELECT id,usuario,rol FROM usuarios", conn)
+                    cur = conn.cursor()
+                    cur.execute("SELECT id,usuario,rol FROM usuarios")
+                    rows = cur.fetchall()
+                df_usr = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame(columns=['id','usuario','rol'])
                 st.dataframe(df_usr, use_container_width=True, height=220)
                 if not df_usr.empty:
                     usr_b = st.selectbox("Usuario a eliminar", df_usr['usuario'])
@@ -1145,7 +1174,9 @@ else:
                             st.error("No puedes eliminar tu propia cuenta activa.")
                         else:
                             with get_conn() as conn:
-                                conn.execute("DELETE FROM usuarios WHERE usuario=%s", (usr_b,))
+                                cur = conn.cursor()
+                                cur.execute("DELETE FROM usuarios WHERE usuario=%s", (usr_b,))
+                                conn.commit()
                             st.success(f"Usuario '{usr_b}' eliminado.")
                             st.rerun()
                 else:
