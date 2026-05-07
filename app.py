@@ -788,17 +788,18 @@ else:
                         data = cur.fetchone()
                     if data:
                         # Precargamos el formulario con los valores actuales de la regla
+                        # RealDictCursor devuelve dict, accedemos por nombre de columna
                         with st.form("edit_form"):
-                            e_dtc  = st.text_input("DTC",       value=data[1])
+                            e_dtc  = st.text_input("DTC",       value=data['dtc'] or "")
                             e_tec  = st.selectbox("Tecnología",
                                 ["Combustión","Híbrido","Eléctrico"],
-                                index=["Combustión","Híbrido","Eléctrico"].index(data[2]))
-                            e_sin  = st.text_area("Síntoma",    value=data[3])
-                            e_cp   = st.text_area("Causa 1",    value=data[4])
-                            e_sp   = st.text_area("Solución 1", value=data[5])
-                            e_cs   = st.text_area("Causa 2",    value=data[6] if data[6] else "")
-                            e_ss   = st.text_area("Solución 2", value=data[7] if data[7] else "")
-                            e_prot = st.text_input("Seguridad", value=data[8] if data[8] else "")
+                                index=["Combustión","Híbrido","Eléctrico"].index(data['tipo_vehiculo']))
+                            e_sin  = st.text_area("Síntoma",    value=data['sintoma'] or "")
+                            e_cp   = st.text_area("Causa 1",    value=data['causa_principal'] or "")
+                            e_sp   = st.text_area("Solución 1", value=data['solucion_principal'] or "")
+                            e_cs   = st.text_area("Causa 2",    value=data['causa_secundaria'] or "")
+                            e_ss   = st.text_area("Solución 2", value=data['solucion_secundaria'] or "")
+                            e_prot = st.text_input("Seguridad", value=data['protocolo_seguridad'] or "")
                             if st.form_submit_button("💾 Actualizar"):
                                 motor.actualizar_regla(id_ed,e_dtc,e_tec,e_sin,e_cp,e_sp,e_cs,e_ss,e_prot)
                                 st.success("✅ Actualizado."); st.rerun()
