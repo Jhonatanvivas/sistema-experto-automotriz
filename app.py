@@ -130,12 +130,12 @@ def login(u, p):
     texto plano (compatibilidad con registros legacy del sistema anterior)."""
     with get_conn() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT rol FROM usuarios WHERE usuario=? AND password=?", (u, hash_pw(p)))
+        cur.execute("SELECT rol FROM usuarios WHERE usuario=%s AND password=%s", (u, hash_pw(p)))
         res = cur.fetchone()
         if not res:  # fallback para usuarios creados antes del hash
-            cur.execute("SELECT rol FROM usuarios WHERE usuario=? AND password=?", (u, p))
+            cur.execute("SELECT rol FROM usuarios WHERE usuario=%s AND password=%s", (u, p))
             res = cur.fetchone()
-    return res[0] if res else None  # devuelve el rol o None si falla
+    return res['rol'] if res else None  # devuelve el rol o None si falla
 
 def cargar_reglas():
     """Trae todas las reglas de diagnóstico de la BD como un DataFrame.
@@ -386,7 +386,7 @@ else:
         # y cuántos resultaron exitosos. Solo aparece si ya tiene registros.
         with get_conn() as conn:
             mis_diag = pd.read_sql_query(
-                "SELECT resultado FROM estadisticas WHERE usuario=?",
+                "SELECT resultado FROM estadisticas WHERE usuario=%s",
                 conn, params=(st.session_state.user,))
         if not mis_diag.empty:
             total_yo = len(mis_diag)
@@ -759,7 +759,7 @@ else:
                                 '''INSERT INTO reglas_diagnostico
                                    (dtc,tipo_vehiculo,sintoma,causa_principal,solucion_principal,
                                     causa_secundaria,solucion_secundaria,protocolo_seguridad)
-                                   VALUES (?,?,?,?,?,?,?,?)''',
+                                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)''',
                                 (n_dtc,n_tec,n_sin,n_cp,n_sp,n_cs,n_ss,n_prot))
                         st.success("Regla guardada."); st.rerun()
 
@@ -773,7 +773,7 @@ else:
                     id_ed = st.selectbox("ID a editar", df_edit['id'], key="sel_editar")
                     with get_conn() as conn:
                         cur = conn.cursor()
-                        cur.execute("SELECT * FROM reglas_diagnostico WHERE id=?", (id_ed,))
+                        cur.execute("SELECT * FROM reglas_diagnostico WHERE id=%s", (id_ed,))
                         data = cur.fetchone()
                     if data:
                         # Precargamos el formulario con los valores actuales de la regla
@@ -807,7 +807,7 @@ else:
                     conf = st.checkbox(f"✅ Confirmo eliminar permanentemente la regla ID {id_el}")
                     if st.button("🗑️ Eliminar", type="primary", disabled=not conf):
                         with get_conn() as conn:
-                            conn.execute("DELETE FROM reglas_diagnostico WHERE id=?", (id_el,))
+                            conn.execute("DELETE FROM reglas_diagnostico WHERE id=%s", (id_el,))
                         st.success(f"Regla {id_el} eliminada."); st.rerun()
                 else:
                     st.info("No hay reglas registradas.")
@@ -1123,7 +1123,7 @@ else:
                         with get_conn() as conn:
                             try:
                                 conn.execute(
-                                    "INSERT INTO usuarios (usuario,password,rol) VALUES (?,?,?)",
+                                    "INSERT INTO usuarios (usuario,password,rol) VALUES (%s,%s,%s)",
                                     (u_n, hash_pw(u_p), u_r))  # contraseña siempre hasheada
                                 st.success(f"Usuario '{u_n}' creado.")
                             except Exception:
@@ -1145,7 +1145,7 @@ else:
                             st.error("No puedes eliminar tu propia cuenta activa.")
                         else:
                             with get_conn() as conn:
-                                conn.execute("DELETE FROM usuarios WHERE usuario=?", (usr_b,))
+                                conn.execute("DELETE FROM usuarios WHERE usuario=%s", (usr_b,))
                             st.success(f"Usuario '{usr_b}' eliminado.")
                             st.rerun()
                 else:
