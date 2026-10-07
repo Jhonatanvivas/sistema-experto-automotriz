@@ -2,6 +2,10 @@
 # EXPERT-AUTO POPAYÁN — Sistema Experto de Diagnóstico Automotriz
 # Desarrollado con Python + Streamlit + Supabase
 #
+# ALCANCE VIGENTE (documento v2): diagnóstico de fallas en vehículos de
+# COMBUSTIÓN INTERNA. Híbridos y eléctricos quedan visibles pero deshabilitados
+# ("próximamente") como trabajo futuro; ver config.py.
+#
 # Este archivo es el punto de entrada principal de la aplicación.
 # Aquí vive toda la interfaz de usuario: login, diagnóstico, administración
 # y el dashboard de validación del Sprint 4.
@@ -20,13 +24,22 @@ import plotly.express as px         # gráficas interactivas rápidas
 import plotly.graph_objects as go   # gráficas con más control manual
 from datetime import datetime, timedelta  # fechas y cálculo de rangos temporales
 from fpdf import FPDF                     # generación del reporte PDF descargable
-from inference_engine import MotorInferencia  # nuestro motor de reglas lógicas
+from inference_engine import MotorInferencia, validar_dtc  # motor de reglas + validación de DTC
+from config import (TECNOLOGIAS, TECNOLOGIA_ACTIVA, etiqueta_tecnologia,
+                    META_TASA_ACIERTO, TIEMPO_MAX_INFERENCIA_S, PROTOCOLO_GENERICO)  # alcance v2
 from database import get_conn, inicializar_bd  # conexión y tablas en Supabase
 
 # Inicializamos la BD una sola vez al arrancar.
 # Con Supabase esto es seguro: usa CREATE TABLE IF NOT EXISTS,
 # así que si las tablas ya existen no hace nada.
-inicializar_bd()
+# st.cache_resource evita repetirlo en CADA interacción del usuario (Streamlit
+# re-ejecuta todo el script en cada clic), lo que ahorraba latencia innecesaria.
+@st.cache_resource(show_spinner=False)
+def _preparar_bd():
+    inicializar_bd()
+    return True
+
+_preparar_bd()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -71,6 +84,11 @@ st.markdown("""
         background: #1a1a2e; color: #888; padding: 2px 8px;
         border-radius: 20px; font-size: 11px;
     }
+    /* RNF1 (usabilidad en taller): botones grandes y fáciles de pulsar */
+    .stButton button, .stDownloadButton button,
+    [data-testid="stFormSubmitButton"] button {
+        min-height: 3rem; font-size: 1.05rem; font-weight: 600;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -100,6 +118,7 @@ if 'logueado' not in st.session_state:
         'sint_actual'    : '',      # texto del síntoma ingresado
         'sint_res'       : None,    # el dict con la regla más probable que devolvió el motor
         'sint_inicio'    : 0,
+        'sint_t_inf'     : 0.0,     # segundos que tardó la inferencia (RNF3)
 
         # — PDF generado —
         # Guardamos los bytes del PDF aquí para que sobrevivan al st.rerun().
@@ -161,11 +180,19 @@ def cargar_reglas():
 def reset_sint():
     """Limpia todo el estado del flujo de síntomas para empezar desde cero.
     Se llama cuando el técnico quiere hacer un diagnóstico nuevo."""
-    st.session_state.update({'paso_sint':0,'sint_actual':'','sint_res':None,'sint_inicio':0})
+    st.session_state.update({'paso_sint':0,'sint_actual':'','sint_res':None,'sint_inicio':0,'sint_t_inf':0.0})
 
 def reset_diag():
     """Igual que reset_sint pero para el flujo de DTC."""
     st.session_state.update({'paso_diag':0,'dtc_actual':'','dtc_inicio':0})
+
+def _hay_precaucion(texto) -> bool:
+    """True si la regla trae una precaución útil para mostrar.
+    Ignora vacíos y el texto genérico que guardaba el módulo de aprendizaje
+    en versiones anteriores."""
+    t = ("" if texto is None else str(texto)).strip()
+    return bool(t) and t.lower() not in (
+        PROTOCOLO_GENERICO.lower(), "none", "nan", "sigue los protocolos estándar")
 
 def duracion_desde(ts):
     """Calcula cuántos segundos pasaron desde que empezó el diagnóstico.
@@ -278,9 +305,11 @@ def generar_pdf_diagnostico(datos: dict) -> bytes:
     secciones = [
         ("Causa identificada",  datos.get("causa",     "---")),
         ("Solucion aplicada",   datos.get("solucion",  "---")),
-        ("Protocolo seguridad", datos.get("seguridad", "---")),
-        ("Conclusion",          datos.get("resultado", "---")),
     ]
+    # La precaución ya no es obligatoria (v2): solo se imprime si la regla la tiene
+    if _hay_precaucion(datos.get("seguridad")):
+        secciones.append(("Precauciones", datos.get("seguridad")))
+    secciones.append(("Conclusion", datos.get("resultado", "---")))
     for label, val in secciones:
         pdf.set_font("Helvetica", "B", 10)
         pdf.cell(ANCHO, 7, f"{label}:", ln=True)
@@ -323,6 +352,59 @@ def mostrar_confianza(pct: int):
         </div>
     </div>
     """, unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COMPONENTES: PRECAUCIÓN OPCIONAL Y MÓDULO DE EXPLICACIÓN
+# ══════════════════════════════════════════════════════════════════════════════
+def mostrar_precaucion(texto):
+    """Muestra una precaución solo si la regla tiene una definida.
+    (En la v1 se mostraba siempre un protocolo de alta tensión; con el alcance
+    reducido a combustión interna ya no es obligatorio.)"""
+    if _hay_precaucion(texto):
+        st.warning(f"⚠️ **Precaución:** {texto}")
+
+
+def mostrar_explicacion(metodo: str, entrada: str, tipo_v: str, res: dict, t_inf: float):
+    """Módulo de explicación (documento v2): le dice al técnico POR QUÉ el sistema
+    llegó a esa conclusión: qué hechos recibió, qué regla se activó, de dónde
+    viene esa regla y cuánto tardó la inferencia (RNF3: máx. 2 s)."""
+    if res.get("origen") == "aprendizaje":
+        origen = "aprendida por el sistema a partir de un caso resuelto por el experto"
+    else:
+        origen = "cargada manualmente en la base de conocimiento"
+    confirmada = int(res.get("veces_exitosa") or 0)
+    ruta_s = "sí" if res.get("causa_s") else "no (solo ruta principal)"
+    estado_t = "✅ dentro del límite" if t_inf <= TIEMPO_MAX_INFERENCIA_S else "⚠️ supera el límite"
+
+    with st.expander("🧠 ¿Por qué este diagnóstico?"):
+        if metodo == "DTC":
+            st.markdown(
+                f"**1. Hechos de entrada:** código `{entrada}` · tecnología *{tipo_v}*\n\n"
+                f"**2. Regla activada (ID {res.get('id')}):** SI el DTC es `{entrada}` "
+                f"Y la tecnología es *{tipo_v}* ENTONCES la causa más probable es: "
+                f"*{res.get('causa_p')}*\n\n"
+                f"**3. Síntoma asociado en la base de conocimiento:** "
+                f"{res.get('sintoma') or 'No especificado'}"
+            )
+        else:
+            palabras = ", ".join(f"`{c}`" for c in res.get("coincidencias", [])) or "—"
+            st.markdown(
+                f"**1. Hechos de entrada:** \"{entrada}\" · tecnología *{tipo_v}*\n\n"
+                f"**2. Términos reconocidos (incluye sinónimos técnicos) que coinciden con la regla:** "
+                f"{palabras}\n\n"
+                f"**3. Regla activada (ID {res.get('id')}):** síntoma registrado: "
+                f"*{res.get('sintoma') or 'No especificado'}* "
+                f"(DTC asociado: {res.get('dtc') or 'N/A'}). "
+                f"Confianza: {res.get('confianza')}%."
+            )
+        st.markdown(
+            f"**Origen de la regla:** {origen}.  \n"
+            f"**Veces confirmada como exitosa:** {confirmada}.  \n"
+            f"**Ruta secundaria disponible:** {ruta_s}.  \n"
+            f"**Tiempo de inferencia:** {t_inf:.2f} s — {estado_t} "
+            f"(máx. {TIEMPO_MAX_INFERENCIA_S:.0f} s)."
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -462,38 +544,60 @@ else:
         # - DTC: tiene el código del escáner OBD (ej. P0300)
         # - Síntomas: describe la falla con palabras propias
         metodo = st.radio("Método de entrada:", ["DTC (Escáner)", "Síntomas (Texto)"], horizontal=True)
-        tipo_v = st.selectbox("Motorización", ["Combustión", "Híbrido", "Eléctrico"])
+        # Alcance v2: solo Combustión está habilitada. Híbrido y Eléctrico se muestran
+        # marcados como "próximamente" y, si se eligen, el diagnóstico queda bloqueado.
+        opciones_tec = {etiqueta_tecnologia(t): t for t in TECNOLOGIAS}
+        sel_tec = st.selectbox(
+            "Motorización", list(opciones_tec.keys()),
+            help="Alcance actual: vehículos de combustión interna. "
+                 "Híbridos y eléctricos se habilitarán en fases posteriores.")
+        tipo_v = opciones_tec[sel_tec]
+        tec_habilitada = TECNOLOGIAS[tipo_v]
 
 
         # ── MODO DTC ──────────────────────────────────────────────────────────
-        if metodo == "DTC (Escáner)":
+        if not tec_habilitada:
+            st.info("🚧 **Próximamente.** El diagnóstico de vehículos híbridos y eléctricos "
+                    "está planificado como trabajo futuro. Por ahora selecciona **Combustión**.")
+        elif metodo == "DTC (Escáner)":
             codigo = st.text_input("Ingrese código DTC (ej: P0300)").upper().strip()
             c1, c2 = st.columns([1, 4])
 
             # Al presionar "Analizar", guardamos el código en session_state
             # y marcamos que estamos en el paso 1 del árbol de decisión
             if c1.button("🔎 Analizar DTC"):
-                st.session_state.paso_diag  = 1
-                st.session_state.dtc_actual = codigo
-                st.session_state.dtc_inicio = time.time()  # empezamos a medir el tiempo
-                st.rerun()
+                # Validación de entrada (Sprint 3): solo se consulta la base si el
+                # texto tiene formato real de DTC (letra + 4 caracteres, ej. P0300).
+                if not codigo:
+                    st.warning("Ingresa un código DTC para analizar.")
+                elif not validar_dtc(codigo):
+                    st.error("❌ Formato de DTC inválido. Debe ser una letra (P, B, C o U), "
+                             "un dígito de 0 a 3 y tres caracteres hexadecimales. Ejemplo: P0300.")
+                else:
+                    st.session_state.paso_diag  = 1
+                    st.session_state.dtc_actual = codigo
+                    st.session_state.dtc_inicio = time.time()  # empezamos a medir el tiempo
+                    st.rerun()
 
             if c2.button("🗑️ Limpiar"):
                 reset_diag(); st.rerun()
 
             # Si ya tenemos un código activo, consultamos el motor
             if st.session_state.paso_diag >= 1 and st.session_state.dtc_actual:
+                _t0 = time.perf_counter()
                 res = motor.consultar_por_dtc(st.session_state.dtc_actual, tipo_v)
+                t_inf = time.perf_counter() - _t0   # RNF3: tiempo de inferencia
 
                 if res["encontrado"]:
-                    # El protocolo de seguridad se muestra siempre, antes que cualquier
-                    # instrucción de diagnóstico. Esto es obligatorio para vehículos
-                    # con sistemas de alta tensión (híbridos y eléctricos).
-                    st.warning(f"🛑 **SEGURIDAD:** {res['seguridad']}")
+                    # Precaución opcional: solo se muestra si la regla tiene una definida.
+                    # (En la v1 era obligatoria por la alta tensión de híbridos y
+                    # eléctricos, que ahora quedan fuera del alcance.)
+                    mostrar_precaucion(res['seguridad'])
 
                     # — PASO 1: Primera hipótesis (causa más probable) —
                     if st.session_state.paso_diag == 1:
                         st.info(f"**Causa 1:** {res['causa_p']}\n\n**Solución 1:** {res['solucion_p']}")
+                        mostrar_explicacion("DTC", st.session_state.dtc_actual, tipo_v, res, t_inf)
                         col1, col2 = st.columns(2)
 
                         if col1.button("✅ Resolvió el problema"):
@@ -504,6 +608,9 @@ else:
                             motor.registrar_estadistica(
                                 st.session_state.dtc_actual, "DTC", tipo_v,
                                 "Acierto 1er Intento", st.session_state.user, dur)
+                            # Igual que en síntomas: la regla confirmada sube en el ranking
+                            if res.get("id"):
+                                motor.registrar_exito_regla(res["id"])
                             motor.registrar_historial(
                                 st.session_state.user, "DTC",
                                 st.session_state.dtc_actual, tipo_v,
@@ -539,6 +646,7 @@ else:
                         else:
                             # No todas las reglas tienen causa secundaria definida
                             st.warning("No hay causa secundaria registrada.")
+                        mostrar_explicacion("DTC", st.session_state.dtc_actual, tipo_v, res, t_inf)
                         col1, col2 = st.columns(2)
 
                         if col1.button("✅ Resolvió (Opción 2)"):
@@ -587,6 +695,9 @@ else:
                 else:
                     # El código DTC no existe en nuestra base de conocimiento
                     st.error("❌ Código DTC no encontrado en la base de datos.")
+                    if not st.session_state.dtc_actual.startswith("P"):
+                        st.caption("ℹ️ El prototipo se concentra en códigos de la categoría P "
+                                   "(motor y transmisión).")
 
 
         # ── MODO SÍNTOMAS ─────────────────────────────────────────────────────
@@ -604,7 +715,9 @@ else:
                 if sint.strip():
                     # El motor devuelve una lista ordenada por confianza descendente.
                     # Tomamos solo el primer resultado (el de mayor confianza).
+                    _t0 = time.perf_counter()
                     resultados = motor.buscar_por_sintoma(sint, tipo_v)
+                    st.session_state.sint_t_inf = time.perf_counter() - _t0   # RNF3
                     fila = resultados[0] if resultados else None
                     if fila:
                         st.session_state.sint_res    = fila
@@ -635,9 +748,11 @@ else:
             elif st.session_state.paso_sint == 1:
                 r = st.session_state.sint_res
                 mostrar_confianza(r["confianza"])   # barra de porcentaje de coincidencia
-                seguridad = r["seguridad"] or "Sigue los protocolos estándar"
-                st.warning(f"🛑 **SEGURIDAD:** {seguridad}")
+                seguridad = r["seguridad"] or ""
+                mostrar_precaucion(seguridad)
                 st.info(f"**Causa 1:** {r['causa_p']}\n\n**Solución 1:** {r['solucion_p']}")
+                mostrar_explicacion("Síntoma", st.session_state.sint_actual, tipo_v, r,
+                                    st.session_state.get('sint_t_inf', 0.0))
                 col1, col2 = st.columns(2)
 
                 if col1.button("✅ Resolvió el problema", key="sint_ok1"):
@@ -681,6 +796,8 @@ else:
                     st.info(f"**Causa 2:** {r['causa_s']}\n\n**Solución 2:** {r['solucion_s']}")
                 else:
                     st.warning("No hay causa secundaria registrada.")
+                mostrar_explicacion("Síntoma", st.session_state.sint_actual, tipo_v, r,
+                                    st.session_state.get('sint_t_inf', 0.0))
                 col1, col2 = st.columns(2)
 
                 if col1.button("✅ Resolvió (Opción 2)", key="sint_ok2"):
@@ -739,6 +856,10 @@ else:
 
             # Tabla completa de todas las reglas existentes
             st.dataframe(df, use_container_width=True, height=280)
+            if not df.empty and 'tipo_vehiculo' in df.columns:
+                n_act = int((df['tipo_vehiculo'] == TECNOLOGIA_ACTIVA).sum())
+                st.caption(f"Reglas activas ({TECNOLOGIA_ACTIVA}): {n_act} · "
+                           f"Reservadas e inactivas (Híbrido/Eléctrico): {len(df) - n_act}")
 
             # Aviso cuando el módulo de aprendizaje automático ha generado reglas nuevas.
             # Esto pasa cuando el admin resuelve un reporte pendiente en la pestaña siguiente.
@@ -754,25 +875,30 @@ else:
                 # clear_on_submit=True limpia los campos después de guardar
                 with st.form("add_form", clear_on_submit=True):
                     c1, c2 = st.columns(2)
-                    n_dtc  = c1.text_input("DTC").upper()    # siempre en mayúsculas
-                    n_tec  = c1.selectbox("Tecnología", ["Combustión","Híbrido","Eléctrico"])
+                    n_dtc  = c1.text_input("DTC", help="Ej: P0300. Usa N/A si la regla es solo por síntoma.").upper()
+                    n_tec  = c1.selectbox("Tecnología", [TECNOLOGIA_ACTIVA],
+                                          help="Híbrido y Eléctrico están reservados para trabajo futuro.")
                     n_sin  = c2.text_area("Síntoma")
                     n_cp   = st.text_area("Causa 1")
                     n_sp   = st.text_area("Solución 1")
                     n_cs   = st.text_area("Causa 2")          # opcional
                     n_ss   = st.text_area("Solución 2")       # opcional
-                    n_prot = st.text_input("Protocolo de Seguridad")
+                    n_prot = st.text_input("Precaución (opcional)")
                     if st.form_submit_button("💾 Guardar"):
-                        with get_conn() as conn:
-                            cur = conn.cursor()
-                            cur.execute(
-                                '''INSERT INTO reglas_diagnostico
-                                   (dtc,tipo_vehiculo,sintoma,causa_principal,solucion_principal,
-                                    causa_secundaria,solucion_secundaria,protocolo_seguridad)
-                                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)''',
-                                (n_dtc,n_tec,n_sin,n_cp,n_sp,n_cs,n_ss,n_prot))
-                            conn.commit()
-                        st.success("Regla guardada."); st.rerun()
+                        n_dtc = n_dtc.strip() or "N/A"
+                        if n_dtc != "N/A" and not validar_dtc(n_dtc):
+                            st.error("DTC con formato inválido (ej: P0300). Usa N/A si la regla es solo por síntoma.")
+                        else:
+                            with get_conn() as conn:
+                                cur = conn.cursor()
+                                cur.execute(
+                                    '''INSERT INTO reglas_diagnostico
+                                       (dtc,tipo_vehiculo,sintoma,causa_principal,solucion_principal,
+                                        causa_secundaria,solucion_secundaria,protocolo_seguridad)
+                                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s)''',
+                                    (n_dtc,n_tec,n_sin,n_cp,n_sp,n_cs,n_ss,n_prot))
+                                conn.commit()
+                            st.success("Regla guardada."); st.rerun()
 
             # — Editar una regla existente —
             with sub2:
@@ -791,18 +917,25 @@ else:
                         # RealDictCursor devuelve dict, accedemos por nombre de columna
                         with st.form("edit_form"):
                             e_dtc  = st.text_input("DTC",       value=data['dtc'] or "")
-                            e_tec  = st.selectbox("Tecnología",
-                                ["Combustión","Híbrido","Eléctrico"],
-                                index=["Combustión","Híbrido","Eléctrico"].index(data['tipo_vehiculo']))
+                            # Las reglas heredadas de Híbrido/Eléctrico se pueden editar,
+                            # pero quedan inactivas: el diagnóstico solo consulta Combustión.
+                            _tecs  = list(TECNOLOGIAS)
+                            e_tec  = st.selectbox("Tecnología", _tecs,
+                                index=_tecs.index(data['tipo_vehiculo']) if data['tipo_vehiculo'] in _tecs else 0,
+                                format_func=etiqueta_tecnologia)
                             e_sin  = st.text_area("Síntoma",    value=data['sintoma'] or "")
                             e_cp   = st.text_area("Causa 1",    value=data['causa_principal'] or "")
                             e_sp   = st.text_area("Solución 1", value=data['solucion_principal'] or "")
                             e_cs   = st.text_area("Causa 2",    value=data['causa_secundaria'] or "")
                             e_ss   = st.text_area("Solución 2", value=data['solucion_secundaria'] or "")
-                            e_prot = st.text_input("Seguridad", value=data['protocolo_seguridad'] or "")
+                            e_prot = st.text_input("Precaución (opcional)", value=data['protocolo_seguridad'] or "")
                             if st.form_submit_button("💾 Actualizar"):
-                                motor.actualizar_regla(id_ed,e_dtc,e_tec,e_sin,e_cp,e_sp,e_cs,e_ss,e_prot)
-                                st.success("✅ Actualizado."); st.rerun()
+                                e_dtc = e_dtc.strip().upper() or "N/A"
+                                if e_dtc != "N/A" and not validar_dtc(e_dtc):
+                                    st.error("DTC con formato inválido (ej: P0300). Usa N/A si la regla es solo por síntoma.")
+                                else:
+                                    motor.actualizar_regla(id_ed,e_dtc,e_tec,e_sin,e_cp,e_sp,e_cs,e_ss,e_prot)
+                                    st.success("✅ Actualizado."); st.rerun()
 
             # — Eliminar una regla —
             with sub3:
@@ -922,7 +1055,10 @@ else:
                 aciertos = int(stats[col_res].str.contains('Acierto', na=False).sum())
                 fallidos = total - aciertos
                 tasa     = round(aciertos / total * 100, 1) if total else 0
-                dur_prom = round(stats[col_dur].mean()) if col_dur in stats.columns else 0
+                # Duración promedio SOLO de diagnósticos exitosos: los "Fallo Reportado"
+                # se guardan con duración 0 y bajaban artificialmente el promedio.
+                _ok = stats[stats[col_res].str.contains('Acierto', na=False)]
+                dur_prom = round(_ok[col_dur].mean()) if (col_dur in stats.columns and not _ok.empty) else 0
 
                 # — Fila de métricas grandes en la parte superior —
                 m1,m2,m3,m4,m5 = st.columns(5)
@@ -951,12 +1087,15 @@ else:
                         color='Diagnósticos', color_continuous_scale='Teal')
                     st.plotly_chart(fig, use_container_width=True)
 
-                # — Fila 2 de gráficas: motorización + resultados por método —
+                # — Fila 2 de gráficas: diagnósticos por técnico + resultados por método —
                 g3, g4 = st.columns(2)
                 with g3:
-                    fig = px.pie(stats, names=col_tec,
-                        title='Por Tipo de Motorización', hole=0.45,
-                        color_discrete_sequence=px.colors.qualitative.Pastel)
+                    # (Con el alcance en combustión, una torta por motorización tendría
+                    # una sola porción; se reemplaza por la carga por técnico.)
+                    por_tec_g = stats.groupby('usuario').size().reset_index(name='Diagnósticos')
+                    fig = px.bar(por_tec_g, x='usuario', y='Diagnósticos',
+                        title='Diagnósticos por Técnico',
+                        color='Diagnósticos', color_continuous_scale='Teal')
                     st.plotly_chart(fig, use_container_width=True)
                 with g4:
                     # Muestra si el método DTC o el de síntomas tiene más aciertos
@@ -982,7 +1121,7 @@ else:
                 # — Tiempo promedio por tipo de resultado —
                 if col_dur in stats.columns:
                     st.subheader("⏱️ Tiempo Promedio por Resultado")
-                    dur_res = stats.groupby(col_res)[col_dur].mean().round().reset_index()
+                    dur_res = _ok.groupby(col_res)[col_dur].mean().round().reset_index()
                     dur_res.columns = ['Resultado','Segundos promedio']
                     fig = px.bar(dur_res, x='Resultado', y='Segundos promedio',
                         color='Segundos promedio', color_continuous_scale='Blues')
@@ -1020,112 +1159,149 @@ else:
             if col_refresh.button("🔄 Actualizar datos", use_container_width=True):
                 st.rerun()
 
-            # Cargamos el historial detallado (uno por diagnóstico) y las estadísticas agregadas
+            # Cargamos el historial detallado (uno por diagnóstico EXITOSO) y las
+            # estadísticas (uno por diagnóstico, exitoso o fallido).
+            # IMPORTANTE: los indicadores de validación se calculan sobre `estadisticas`.
+            # `historial_diagnosticos` solo guarda casos resueltos; calcular la tasa de
+            # acierto sobre él daba siempre 100 %, sin importar cuántos casos fallaran.
             with get_conn() as conn:
                 cur = conn.cursor()
                 cur.execute("SELECT * FROM historial_diagnosticos ORDER BY fecha DESC")
                 rows_hist = cur.fetchall()
-                cur.execute("SELECT * FROM estadisticas")
+                cur.execute("SELECT * FROM estadisticas ORDER BY fecha DESC")
                 rows_stats = cur.fetchall()
             hist      = pd.DataFrame([dict(r) for r in rows_hist])  if rows_hist  else pd.DataFrame()
             stats_val = pd.DataFrame([dict(r) for r in rows_stats]) if rows_stats else pd.DataFrame()
 
-            if not hist.empty:
+            if not stats_val.empty:
                 # — Filtros de visualización —
                 col_f1, col_f2 = st.columns(2)
-                tecnicos = ["Todos"] + sorted(hist['usuario'].dropna().unique().tolist())
+                tecnicos = ["Todos"] + sorted(stats_val['usuario'].dropna().unique().tolist())
                 tec_sel  = col_f1.selectbox("Filtrar por técnico:", tecnicos)
                 rango    = col_f2.selectbox("Período:",
                     ["Hoy","Últimos 7 días","Últimos 30 días","Todo"])
 
                 # Filtro por fecha: convertimos la columna a datetime y aplicamos el rango.
-                # Usamos tz_localize(None) para evitar conflictos de timezone con SQLite,
-                # que guarda los timestamps sin información de zona horaria.
-                ahora = datetime.now()
-                hist['fecha_dt'] = pd.to_datetime(hist['fecha'], errors='coerce')
+                # tz_localize(None) evita conflictos si alguna fecha llega con zona horaria.
+                ahora  = datetime.now()
                 rangos = {"Hoy": 1, "Últimos 7 días": 7, "Últimos 30 días": 30, "Todo": 9999}
                 dias   = rangos[rango]
+                stats_val['fecha_dt'] = pd.to_datetime(stats_val['fecha'], errors='coerce')
+                if not hist.empty:
+                    hist['fecha_dt'] = pd.to_datetime(hist['fecha'], errors='coerce')
                 if dias < 9999:
                     desde = ahora - timedelta(days=dias)
-                    hist = hist[hist['fecha_dt'].dt.tz_localize(None) >= desde]
+                    stats_val = stats_val[stats_val['fecha_dt'].dt.tz_localize(None) >= desde]
+                    if not hist.empty:
+                        hist = hist[hist['fecha_dt'].dt.tz_localize(None) >= desde]
                 if tec_sel != "Todos":
-                    hist = hist[hist['usuario'] == tec_sel]
+                    stats_val = stats_val[stats_val['usuario'] == tec_sel]
+                    if not hist.empty:
+                        hist = hist[hist['usuario'] == tec_sel]
 
                 st.divider()
 
-                # — KPIs del Sprint 4 —
-                total_val = len(hist)
-                exito_val = int(hist['resultado'].str.contains('Acierto', na=False).sum())
-                tasa_val  = round(exito_val / total_val * 100, 1) if total_val else 0
-                dur_val   = 0
-                if not stats_val.empty and 'duracion_seg' in stats_val.columns:
-                    dur_val = round(stats_val['duracion_seg'].mean())
-
-                k1,k2,k3,k4 = st.columns(4)
-                k1.metric("Casos Evaluados",   total_val)
-                k2.metric("Exitosos",          int(exito_val))
-                k3.metric("Tasa de Acierto",   f"{tasa_val} %")
-                k4.metric("Tiempo Promedio",   f"{dur_val}s")
-
-                # — Barra de progreso hacia el objetivo del 70% —
-                # Verde si ya se alcanzó, amarillo si aún no.
-                # Este es el indicador clave de la validación del Sprint 4.
-                objetivo = 70
-                color_obj = "#4CAF50" if tasa_val >= objetivo else "#FFC107"
-                st.markdown(f"""
-                <div style='background:#1a1a2e;border:1px solid {color_obj};
-                            border-radius:10px;padding:16px;margin:12px 0;'>
-                    <b style='color:{color_obj};'>🎯 Objetivo Sprint 4: {objetivo}% de acierto</b>
-                    <div style='background:#333;border-radius:5px;height:12px;margin-top:8px;'>
-                        <div style='width:{min(tasa_val,100)}%;background:{color_obj};
-                                    height:12px;border-radius:5px;'></div>
-                    </div>
-                    <div style='color:#aaa;font-size:12px;margin-top:4px;'>
-                        Actual: {tasa_val}% / {objetivo}% objetivo
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-                st.divider()
-
-                # — Tabla resumen por técnico —
-                # Muestra cuántos casos hizo cada uno y su tasa individual de acierto
-                st.subheader("📊 Resultados por Técnico")
-                por_tec = hist.groupby('usuario').agg(
-                    Total=('resultado','count'),
-                    Exitosos=('resultado', lambda x: int(x.str.contains('Acierto',na=False).sum()))
-                ).reset_index()
-                # Conversión explícita a float para evitar TypeError con pandas + Python 3.14
-                por_tec['Tasa %'] = (por_tec['Exitosos'].astype(float) / por_tec['Total'].astype(float) * 100).round(1)
-                st.dataframe(por_tec, use_container_width=True, height=220)
-
-                # — Detalle caso por caso —
-                st.subheader("📋 Historial Detallado")
-                st.dataframe(hist.drop(columns=['fecha_dt'], errors='ignore'),
-                    use_container_width=True, height=300)
-
-                # Exportamos el historial como CSV para incluirlo en la tesis
-                csv_bytes = hist.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    "📥 Exportar datos para tesis (CSV)",
-                    data=csv_bytes,
-                    file_name=f"validacion_sprint4_{datetime.now().strftime('%Y%m%d')}.csv",
-                    mime="text/csv"
-                )
-            else:
-                # Si el historial está vacío, verificamos si es por el filtro o porque no hay datos
-                with get_conn() as _conn:
-                    _cur = _conn.cursor()
-                    _cur.execute("SELECT COUNT(*) as c FROM historial_diagnosticos")
-                    _total_hist = int(_cur.fetchone()['c'])
-                if _total_hist > 0:
-                    # Hay datos pero el filtro activo los está ocultando
-                    st.warning(f"⚠️ Hay **{_total_hist} diagnóstico(s)** en la BD pero el filtro actual no muestra ninguno. "
-                               f"Cambia el período a **'Todo'** o selecciona **'Todos'** los técnicos.")
+                if stats_val.empty:
+                    # Hay datos en la BD, pero el filtro activo los está ocultando
+                    st.warning("⚠️ Hay diagnósticos en la BD pero el filtro actual no muestra ninguno. "
+                               "Cambia el período a **'Todo'** o selecciona **'Todos'** los técnicos.")
                 else:
-                    # La tabla realmente está vacía: nadie ha hecho diagnósticos aún
-                    st.info("Aún no hay diagnósticos registrados en el historial.")
-                    st.caption("Los diagnósticos aparecen aquí automáticamente cuando los técnicos usen el sistema.")
+                    # — Indicadores de validación del Sprint 4 (documento v2) —
+                    #   1. Tasa de acierto (meta META_TASA_ACIERTO %)
+                    #   2. Tiempo promedio de diagnóstico (solo casos exitosos)
+                    #   3. Tasa de reincidencia: casos que agotan las dos rutas
+                    es_acierto = stats_val['resultado'].str.contains('Acierto', na=False)
+                    total_val  = len(stats_val)
+                    exito_val  = int(es_acierto.sum())
+                    fallo_val  = total_val - exito_val
+                    tasa_val   = round(exito_val / total_val * 100, 1)
+                    reinc_val  = round(fallo_val / total_val * 100, 1)
+                    dur_ok     = pd.to_numeric(stats_val.loc[es_acierto, 'duracion_seg'], errors='coerce')
+                    dur_val    = int(round(dur_ok.mean())) if dur_ok.notna().any() else 0
+
+                    k1,k2,k3,k4,k5 = st.columns(5)
+                    k1.metric("Casos Evaluados",        total_val)
+                    k2.metric("Exitosos",               exito_val)
+                    k3.metric("Tasa de Acierto",        f"{tasa_val} %")
+                    k4.metric("Reincidencia (no resueltos)", f"{reinc_val} %")
+                    k5.metric("Tiempo Promedio",        f"{dur_val}s")
+
+                    # — Barra de progreso hacia la meta de acierto —
+                    # Verde si ya se alcanzó, amarillo si aún no.
+                    objetivo  = META_TASA_ACIERTO
+                    color_obj = "#4CAF50" if tasa_val >= objetivo else "#FFC107"
+                    st.markdown(f"""
+                    <div style='background:#1a1a2e;border:1px solid {color_obj};
+                                border-radius:10px;padding:16px;margin:12px 0;'>
+                        <b style='color:{color_obj};'>🎯 Objetivo Sprint 4: {objetivo}% de acierto</b>
+                        <div style='background:#333;border-radius:5px;height:12px;margin-top:8px;'>
+                            <div style='width:{min(tasa_val,100)}%;background:{color_obj};
+                                        height:12px;border-radius:5px;'></div>
+                        </div>
+                        <div style='color:#aaa;font-size:12px;margin-top:4px;'>
+                            Actual: {tasa_val}% / {objetivo}% objetivo
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    # — Comparación contra el método tradicional —
+                    # El documento exige comparar contra el tiempo promedio del método
+                    # tradicional reportado en las entrevistas iniciales. Ese dato NO se
+                    # inventa: el investigador lo digita aquí cuando lo tenga.
+                    st.subheader("⏱️ Comparación con el método tradicional")
+                    t_trad = st.number_input(
+                        "Tiempo promedio del método tradicional (segundos), según las entrevistas",
+                        min_value=0, value=0, step=30,
+                        help="Déjalo en 0 mientras no tengas el dato de las entrevistas.")
+                    if t_trad > 0 and dur_val > 0:
+                        red = round((t_trad - dur_val) / t_trad * 100, 1)
+                        st.metric("Reducción del tiempo de diagnóstico", f"{red} %",
+                                  delta=f"{t_trad - dur_val:+d} s respecto al método tradicional")
+                    else:
+                        st.caption("Pendiente: ingresa el tiempo del método tradicional para "
+                                   "calcular la reducción. No se asume ningún valor por defecto.")
+
+                    st.divider()
+
+                    # — Tabla resumen por técnico —
+                    st.subheader("📊 Resultados por Técnico")
+                    por_tec = stats_val.groupby('usuario').agg(
+                        Total=('resultado','count'),
+                        Exitosos=('resultado', lambda x: int(x.str.contains('Acierto',na=False).sum()))
+                    ).reset_index()
+                    por_tec['No resueltos'] = por_tec['Total'] - por_tec['Exitosos']
+                    # Conversión explícita a float para evitar TypeError con pandas + Python 3.14
+                    por_tec['Tasa %'] = (por_tec['Exitosos'].astype(float) / por_tec['Total'].astype(float) * 100).round(1)
+                    st.dataframe(por_tec, use_container_width=True, height=220)
+
+                    # — Detalle caso por caso (solo diagnósticos resueltos) —
+                    st.subheader("📋 Historial Detallado (casos resueltos)")
+                    if hist.empty:
+                        st.info("No hay casos resueltos en el filtro actual.")
+                    else:
+                        st.dataframe(hist.drop(columns=['fecha_dt'], errors='ignore'),
+                            use_container_width=True, height=300)
+
+                    # Exportamos para incluir los datos en la tesis (utf-8-sig: Excel abre bien las tildes)
+                    fecha_arch = datetime.now().strftime('%Y%m%d')
+                    ce1, ce2 = st.columns(2)
+                    ce1.download_button(
+                        "📥 Exportar matriz de validación (CSV)",
+                        data=stats_val.drop(columns=['fecha_dt'], errors='ignore')
+                                      .to_csv(index=False).encode('utf-8-sig'),
+                        file_name=f"validacion_sprint4_{fecha_arch}.csv",
+                        mime="text/csv", key="csv_validacion")
+                    if not hist.empty:
+                        ce2.download_button(
+                            "📥 Exportar historial detallado (CSV)",
+                            data=hist.drop(columns=['fecha_dt'], errors='ignore')
+                                     .to_csv(index=False).encode('utf-8-sig'),
+                            file_name=f"historial_sprint4_{fecha_arch}.csv",
+                            mime="text/csv", key="csv_historial")
+            else:
+                # La tabla realmente está vacía: nadie ha hecho diagnósticos aún
+                st.info("Aún no hay diagnósticos registrados.")
+                st.caption("Los diagnósticos aparecen aquí automáticamente cuando los técnicos usen el sistema.")
 
 
         # ── PESTAÑA 5 — GESTIÓN DE USUARIOS ───────────────────────────────────
