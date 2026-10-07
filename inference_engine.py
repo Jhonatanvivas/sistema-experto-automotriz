@@ -1,15 +1,32 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# inference_engine.py — Motor de Inferencia
+# inference_engine.py — Motor de Inferencia (encadenamiento hacia adelante)
 #
-# Migrado de SQLite a Supabase (PostgreSQL).
-# El único cambio respecto a la versión SQLite es:
-#   - sqlite3.connect(...)  →  get_conn() de database.py
-#   - Placeholders ?        →  %s  (estándar psycopg2)
-#   - Las filas llegan como dict gracias a RealDictCursor
+# Base de conocimiento: PostgreSQL (Supabase). Alcance v2: combustión interna.
+#
+# Cambios de la versión v2 respecto a la versión anterior:
+#   - validar_dtc(): validación de formato del código (Sprint 3).
+#   - consultar_por_dtc(): devuelve además id, origen y veces_exitosa para el
+#     módulo de explicación, y prioriza las reglas generadas por el módulo de
+#     aprendizaje (antes, una regla aprendida para un DTC ya existente quedaba
+#     oculta detrás de la regla original).
+#   - buscar_por_sintoma(): devuelve las palabras que coincidieron (explicación),
+#     ignora palabras vacías y signos de puntuación.
+#   - Las reglas aprendidas ya no guardan un "protocolo de seguridad" genérico.
 # ══════════════════════════════════════════════════════════════════════════════
 
+import re
+
 from database import get_conn
-from sinonimos import expandir_con_sinonimos
+from sinonimos import expandir_con_sinonimos, tokenizar
+
+# Formato OBD-II: letra de sistema (P, B, C, U) + 4 caracteres hexadecimales,
+# donde el segundo es 0-3. Ejemplos válidos: P0300, P0171, U0100.
+_PATRON_DTC = re.compile(r"^[PBCU][0-3][0-9A-F]{3}$")
+
+
+def validar_dtc(codigo: str) -> bool:
+    """True si el texto tiene formato de código DTC OBD-II (ej. P0300)."""
+    return bool(_PATRON_DTC.match((codigo or "").upper().strip()))
 
 
 class MotorInferencia:
@@ -18,29 +35,38 @@ class MotorInferencia:
     # CONSULTA POR DTC
     # ══════════════════════════════════════════════════════════════════════════
     def consultar_por_dtc(self, dtc, tipo_vehiculo):
-        """Busca la regla exacta para un código DTC y tipo de vehículo.
-        Devuelve un dict con encontrado=True/False y los campos de la regla."""
+        """Busca la regla para un código DTC y tipo de vehículo.
+
+        Si existen varias reglas para el mismo par (dtc, tipo), gana la más
+        reciente generada por el módulo de aprendizaje; si no hay ninguna,
+        la regla más reciente en general. Devuelve un dict con
+        encontrado=True/False y los campos de la regla."""
         with get_conn() as conn:
             cur = conn.cursor()
             cur.execute(
-                '''SELECT causa_principal, solucion_principal,
+                '''SELECT id, causa_principal, solucion_principal,
                           causa_secundaria, solucion_secundaria,
-                          protocolo_seguridad, sintoma
+                          protocolo_seguridad, sintoma, origen, veces_exitosa
                    FROM reglas_diagnostico
-                   WHERE dtc = %s AND tipo_vehiculo = %s''',
+                   WHERE dtc = %s AND tipo_vehiculo = %s
+                   ORDER BY (COALESCE(origen, 'manual') = 'aprendizaje') DESC, id DESC
+                   LIMIT 1''',
                 (dtc.upper().strip(), tipo_vehiculo)
             )
             res = cur.fetchone()
 
         if res:
             return {
-                "encontrado" : True,
-                "causa_p"    : res['causa_principal'],
-                "solucion_p" : res['solucion_principal'],
-                "causa_s"    : res['causa_secundaria'],
-                "solucion_s" : res['solucion_secundaria'],
-                "seguridad"  : res['protocolo_seguridad'],
-                "sintoma"    : res['sintoma'],
+                "encontrado"    : True,
+                "id"            : res['id'],
+                "causa_p"       : res['causa_principal'],
+                "solucion_p"    : res['solucion_principal'],
+                "causa_s"       : res['causa_secundaria'],
+                "solucion_s"    : res['solucion_secundaria'],
+                "seguridad"     : res['protocolo_seguridad'],
+                "sintoma"       : res['sintoma'],
+                "origen"        : res['origen'] or 'manual',
+                "veces_exitosa" : res['veces_exitosa'] or 0,
             }
         return {"encontrado": False}
 
@@ -51,14 +77,14 @@ class MotorInferencia:
         """Búsqueda de texto libre con expansión de sinónimos y % de confianza.
         Devuelve lista de dicts ordenados por confianza descendente."""
         palabras_expandidas = expandir_con_sinonimos(busqueda)
-        palabras_originales = busqueda.lower().strip().split()
+        palabras_originales = tokenizar(busqueda)
 
         with get_conn() as conn:
             cur = conn.cursor()
             cur.execute(
                 '''SELECT dtc, sintoma, causa_principal, solucion_principal,
                           causa_secundaria, solucion_secundaria,
-                          protocolo_seguridad, id
+                          protocolo_seguridad, id, origen, veces_exitosa
                    FROM reglas_diagnostico
                    WHERE tipo_vehiculo = %s''',
                 (tipo_vehiculo,)
@@ -71,22 +97,26 @@ class MotorInferencia:
         resultados = []
         for fila in todas:
             texto_bd = f"{fila['sintoma'] or ''} {fila['causa_principal'] or ''}".lower()
-            encontradas = sum(1 for p in palabras_expandidas if p in texto_bd)
+            coincidencias = sorted(p for p in palabras_expandidas if p in texto_bd)
+            encontradas = len(coincidencias)
             if encontradas == 0:
                 continue
             confianza = round(min(encontradas / max(len(palabras_originales), 1), 1.0) * 100)
             resultados.append({
-                "dtc"        : fila['dtc'],
-                "sintoma"    : fila['sintoma'],
-                "causa_p"    : fila['causa_principal'],
-                "solucion_p" : fila['solucion_principal'],
-                "causa_s"    : fila['causa_secundaria'],
-                "solucion_s" : fila['solucion_secundaria'],
-                "seguridad"  : fila['protocolo_seguridad'],
-                "id"         : fila['id'],
-                "confianza"  : confianza,
-                "encontradas": encontradas,
-                "total"      : len(palabras_originales),
+                "dtc"           : fila['dtc'],
+                "sintoma"       : fila['sintoma'],
+                "causa_p"       : fila['causa_principal'],
+                "solucion_p"    : fila['solucion_principal'],
+                "causa_s"       : fila['causa_secundaria'],
+                "solucion_s"    : fila['solucion_secundaria'],
+                "seguridad"     : fila['protocolo_seguridad'],
+                "id"            : fila['id'],
+                "origen"        : fila['origen'] or 'manual',
+                "veces_exitosa" : fila['veces_exitosa'] or 0,
+                "confianza"     : confianza,
+                "encontradas"   : encontradas,
+                "coincidencias" : coincidencias,
+                "total"         : len(palabras_originales),
             })
 
         resultados.sort(key=lambda x: (x["confianza"], x["encontradas"]), reverse=True)
@@ -142,7 +172,7 @@ class MotorInferencia:
 
     def resolver_caso_pendiente(self, id_reporte, causa_real, solucion_real):
         """Marca el reporte como resuelto y genera una nueva regla automáticamente
-        (módulo de aprendizaje). Devuelve True si todo fue bien."""
+        (módulo de aprendizaje asistido). Devuelve True si todo fue bien."""
         with get_conn() as conn:
             cur = conn.cursor()
             cur.execute("SELECT * FROM casos_pendientes WHERE id=%s", (id_reporte,))
@@ -156,7 +186,7 @@ class MotorInferencia:
                 (causa_real, solucion_real, id_reporte)
             )
 
-            # Aprendizaje automático: insertar nueva regla
+            # Aprendizaje: insertar nueva regla (sin protocolo de seguridad genérico)
             dtc_o_sint = reporte['dtc_o_sintoma']
             tecnologia = reporte['tecnologia']
             tipo_diag  = reporte['tipo_diagnostico']
@@ -170,7 +200,7 @@ class MotorInferencia:
                     (dtc_o_sint, tecnologia,
                      f"Falla reportada: {reporte['comentario_mecanico']}",
                      causa_real, solucion_real,
-                     "Verificar sistema antes de intervenir", "aprendizaje")
+                     None, "aprendizaje")
                 )
             else:
                 cur.execute(
@@ -180,7 +210,7 @@ class MotorInferencia:
                        VALUES (%s, %s, %s, %s, %s, %s, %s)''',
                     ("N/A", tecnologia, dtc_o_sint,
                      causa_real, solucion_real,
-                     "Verificar sistema antes de intervenir", "aprendizaje")
+                     None, "aprendizaje")
                 )
             conn.commit()
         return True
