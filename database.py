@@ -20,6 +20,14 @@ import psycopg2
 from psycopg2.extras import RealDictCursor  # devuelve filas como dict, no como tuplas
 
 
+def _secreto(clave: str, por_defecto: str) -> str:
+    """Lee un valor opcional de st.secrets; si no existe devuelve el valor por defecto."""
+    try:
+        return str(st.secrets[clave])
+    except Exception:
+        return por_defecto
+
+
 # ── Conexión ──────────────────────────────────────────────────────────────────
 
 def get_conn():
@@ -124,17 +132,21 @@ def inicializar_bd():
     ''')
 
     # ── USUARIOS POR DEFECTO ──────────────────────────────────────────────────
-    # Solo los insertamos si la tabla está vacía, para no duplicar en cada reinicio
-    # INSERT OR IGNORE equivalente en PostgreSQL: ON CONFLICT DO NOTHING
-    # Así nunca falla aunque los usuarios ya existan
-    cur.execute(
-        "INSERT INTO usuarios (usuario, password, rol) VALUES (%s, %s, %s) ON CONFLICT (usuario) DO NOTHING",
-        ('admin', hash_pw('admin123'), 'Administrador')
-    )
-    cur.execute(
-        "INSERT INTO usuarios (usuario, password, rol) VALUES (%s, %s, %s) ON CONFLICT (usuario) DO NOTHING",
-        ('taller1', hash_pw('taller123'), 'Mecanico')
-    )
+    # Solo se crean si la tabla está COMPLETAMENTE vacía (primer despliegue).
+    # Antes se reinsertaban en cada reinicio, de modo que borrar 'admin' o
+    # 'taller1' desde el panel no servía: reaparecían con la clave por defecto.
+    # Las contraseñas iniciales pueden definirse en los secrets de Streamlit
+    # (ADMIN_PASSWORD y TALLER1_PASSWORD); si no existen, se usan las de demo.
+    cur.execute("SELECT COUNT(*) AS n FROM usuarios")
+    if cur.fetchone()['n'] == 0:
+        cur.execute(
+            "INSERT INTO usuarios (usuario, password, rol) VALUES (%s, %s, %s)",
+            ('admin', hash_pw(_secreto('ADMIN_PASSWORD', 'admin123')), 'Administrador')
+        )
+        cur.execute(
+            "INSERT INTO usuarios (usuario, password, rol) VALUES (%s, %s, %s)",
+            ('taller1', hash_pw(_secreto('TALLER1_PASSWORD', 'taller123')), 'Mecanico')
+        )
 
     conn.commit()
     cur.close()
