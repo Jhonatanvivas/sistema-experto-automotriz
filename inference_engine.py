@@ -17,7 +17,7 @@
 import re
 
 from database import get_conn
-from sinonimos import expandir_con_sinonimos, tokenizar
+from sinonimos import analizar_consulta, puntuar_regla
 
 # Formato OBD-II: letra de sistema (P, B, C, U) + 4 caracteres hexadecimales,
 # donde el segundo es 0-3. Ejemplos válidos: P0300, P0171, U0100.
@@ -74,10 +74,20 @@ class MotorInferencia:
     # BÚSQUEDA POR SÍNTOMA
     # ══════════════════════════════════════════════════════════════════════════
     def buscar_por_sintoma(self, busqueda, tipo_vehiculo):
-        """Búsqueda de texto libre con expansión de sinónimos y % de confianza.
-        Devuelve lista de dicts ordenados por confianza descendente."""
-        palabras_expandidas = expandir_con_sinonimos(busqueda)
-        palabras_originales = tokenizar(busqueda)
+        """Búsqueda de texto libre por conceptos (obs. 4.1 a 4.3 del informe).
+
+        Devuelve una lista de dicts ordenada de mayor a menor coincidencia.
+        Cada dict trae "suficiente": True solo si la regla supera el umbral
+        (config.UMBRAL_COINCIDENCIA) y cubre la cantidad mínima de términos
+        específicos. La app NO debe recomendar una reparación cuando
+        "suficiente" es False: debe pedir más datos.
+
+        "coincidencia" es el % de lo descrito por el técnico que aparece en la
+        regla (original = 1.0, sinónimo = PESO_SINONIMO, genérico = PESO_GENERICO);
+        no es una probabilidad de acierto. Lista vacía = ninguna regla relacionada."""
+        conceptos = analizar_consulta(busqueda)
+        if not conceptos:
+            return []
 
         with get_conn() as conn:
             cur = conn.cursor()
@@ -91,17 +101,12 @@ class MotorInferencia:
             )
             todas = cur.fetchall()
 
-        if not todas:
-            return []
-
         resultados = []
         for fila in todas:
-            texto_bd = f"{fila['sintoma'] or ''} {fila['causa_principal'] or ''}".lower()
-            coincidencias = sorted(p for p in palabras_expandidas if p in texto_bd)
-            encontradas = len(coincidencias)
-            if encontradas == 0:
+            texto_bd = f"{fila['sintoma'] or ''} {fila['causa_principal'] or ''}"
+            p = puntuar_regla(conceptos, texto_bd)
+            if p is None:
                 continue
-            confianza = round(min(encontradas / max(len(palabras_originales), 1), 1.0) * 100)
             resultados.append({
                 "dtc"           : fila['dtc'],
                 "sintoma"       : fila['sintoma'],
@@ -113,13 +118,19 @@ class MotorInferencia:
                 "id"            : fila['id'],
                 "origen"        : fila['origen'] or 'manual',
                 "veces_exitosa" : fila['veces_exitosa'] or 0,
-                "confianza"     : confianza,
-                "encontradas"   : encontradas,
-                "coincidencias" : coincidencias,
-                "total"         : len(palabras_originales),
+                "coincidencia"  : p["coincidencia"],
+                "suficiente"    : p["suficiente"],
+                "originales"    : p["originales"],
+                "derivados"     : p["derivados"],
+                "sin_cobertura" : p["sin_cobertura"],
+                "especificos_cubiertos": p["especificos_cubiertos"],
+                "especificos_total"    : p["especificos_total"],
             })
 
-        resultados.sort(key=lambda x: (x["confianza"], x["encontradas"]), reverse=True)
+        resultados.sort(
+            key=lambda x: (x["suficiente"], x["coincidencia"],
+                           x["especificos_cubiertos"], x["veces_exitosa"]),
+            reverse=True)
         return resultados
 
     # ══════════════════════════════════════════════════════════════════════════
