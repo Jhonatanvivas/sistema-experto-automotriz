@@ -79,6 +79,7 @@ SINONIMOS_AUTOMOTRIZ = {
                         "perdida de potencia", "perdida potencia", "falta de potencia"],
     "check engine": ["testigo motor", "luz check", "luz naranja", "luz amarilla motor"],
     "consumo"    : ["gasta mucho", "alto consumo", "combustible excesivo"],
+    "trafico"    : ["trancon", "atasco", "embotellamiento"],
 }
 
 # Términos demasiado frecuentes en las reglas: coinciden con casi cualquiera y por
