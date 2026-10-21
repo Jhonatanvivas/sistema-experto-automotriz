@@ -258,3 +258,4 @@ class MotorInferencia:
                 (id_regla,)
             )
             conn.commit()
+
