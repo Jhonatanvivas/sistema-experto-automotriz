@@ -26,7 +26,8 @@ from datetime import datetime, timedelta  # fechas y cálculo de rangos temporal
 from fpdf import FPDF                     # generación del reporte PDF descargable
 from inference_engine import MotorInferencia, validar_dtc  # motor de reglas + validación de DTC
 from config import (TECNOLOGIAS, TECNOLOGIA_ACTIVA, etiqueta_tecnologia,
-                    META_TASA_ACIERTO, TIEMPO_MAX_INFERENCIA_S, PROTOCOLO_GENERICO)  # alcance v2
+                    META_TASA_ACIERTO, TIEMPO_MAX_INFERENCIA_S, PROTOCOLO_GENERICO,
+                    UMBRAL_COINCIDENCIA)  # alcance v2 + umbral de síntomas
 from database import get_conn, inicializar_bd  # conexión y tablas en Supabase
 
 # Inicializamos la BD una sola vez al arrancar.
@@ -73,7 +74,7 @@ st.markdown("""
     }
     /* Pestañas más legibles */
     .stTabs [data-baseweb="tab"] { font-weight: 600; font-size: 14px; }
-    /* Barra de confianza del diagnóstico por síntoma */
+    /* Barra de coincidencia con la regla (diagnóstico por síntoma) */
     .conf-bar { height: 10px; border-radius: 5px; margin-top: 4px; }
     /* Etiquetas que distinguen reglas manuales de las aprendidas automáticamente */
     .badge-aprendizaje {
@@ -114,11 +115,13 @@ if 'logueado' not in st.session_state:
 
         # — Flujo de diagnóstico por síntomas —
         # igual que DTC pero con su propio estado independiente
-        'paso_sint'      : 0,       # -1 = sin resultados, 1 = causa 1, 2 = causa 2, 3 = reporte
+        'paso_sint'      : 0,       # -1 = sin resultados, -2 = coincidencia insuficiente (pedir más datos),
+                                    # 1 = causa 1, 2 = causa 2, 3 = reporte
         'sint_actual'    : '',      # texto del síntoma ingresado
         'sint_res'       : None,    # el dict con la regla más probable que devolvió el motor
         'sint_inicio'    : 0,
         'sint_t_inf'     : 0.0,     # segundos que tardó la inferencia (RNF3)
+        'sint_parcial'   : [],      # reglas relacionadas pero por debajo del umbral (no se recomienda reparación)
 
         # — PDF generado —
         # Guardamos los bytes del PDF aquí para que sobrevivan al st.rerun().
@@ -180,7 +183,7 @@ def cargar_reglas():
 def reset_sint():
     """Limpia todo el estado del flujo de síntomas para empezar desde cero.
     Se llama cuando el técnico quiere hacer un diagnóstico nuevo."""
-    st.session_state.update({'paso_sint':0,'sint_actual':'','sint_res':None,'sint_inicio':0,'sint_t_inf':0.0})
+    st.session_state.update({'paso_sint':0,'sint_actual':'','sint_res':None,'sint_inicio':0,'sint_t_inf':0.0,'sint_parcial':[]})
 
 def reset_diag():
     """Igual que reset_sint pero para el flujo de DTC."""
@@ -336,20 +339,22 @@ def generar_pdf_diagnostico(datos: dict) -> bytes:
 # Se usa en el modo de diagnóstico por síntomas para mostrarle al técnico
 # cuán seguro está el sistema de su recomendación
 # ══════════════════════════════════════════════════════════════════════════════
-def mostrar_confianza(pct: int):
-    """Renderiza una barra de progreso coloreada con el porcentaje de confianza.
-    Verde >= 70%, Amarillo >= 40%, Rojo < 40%.
-    El porcentaje lo calcula el motor de inferencia según cuántas palabras
-    del síntoma ingresado coincidieron con las reglas de la BD."""
-    color = "#4CAF50" if pct >= 70 else "#FFC107" if pct >= 40 else "#F44336"
-    label = "Alta" if pct >= 70 else "Media" if pct >= 40 else "Baja"
+def mostrar_coincidencia(pct: int):
+    """Barra con la COINCIDENCIA CON LA REGLA (obs. 4.3 del informe de revisión).
+
+    Mide qué parte de lo que describió el técnico aparece en la regla (con los
+    sinónimos ponderados menos que los términos literales). NO es la precisión ni la
+    probabilidad de que el diagnóstico sea correcto; por eso no se rotula "confianza"."""
+    color = "#4CAF50" if pct >= 80 else "#FFC107"
     st.markdown(f"""
     <div style='margin-bottom:12px;'>
-        <span style='font-size:13px;color:#aaa;'>Confianza del diagnóstico: </span>
-        <b style='color:{color};font-size:15px;'>{pct}% — {label}</b>
+        <span style='font-size:13px;color:#aaa;'>Coincidencia con la regla: </span>
+        <b style='color:{color};font-size:15px;'>{pct}%</b>
         <div style='background:#333;border-radius:5px;height:8px;margin-top:4px;'>
             <div style='width:{pct}%;background:{color};height:8px;border-radius:5px;'></div>
         </div>
+        <span style='font-size:11px;color:#777;'>Indica cuánto de lo descrito aparece en la regla;
+        no es la probabilidad de que el diagnóstico sea correcto.</span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -388,15 +393,20 @@ def mostrar_explicacion(metodo: str, entrada: str, tipo_v: str, res: dict, t_inf
                 f"{res.get('sintoma') or 'No especificado'}"
             )
         else:
-            palabras = ", ".join(f"`{c}`" for c in res.get("coincidencias", [])) or "—"
+            originales = ", ".join(f"`{c}`" for c in res.get("originales", [])) or "—"
+            derivados  = ", ".join(f"`{d}` (equivalente de «{o}»)"
+                                   for d, o in res.get("derivados", [])) or "ninguno"
+            faltan     = ", ".join(f"`{c}`" for c in res.get("sin_cobertura", [])) or "ninguno"
             st.markdown(
                 f"**1. Hechos de entrada:** \"{entrada}\" · tecnología *{tipo_v}*\n\n"
-                f"**2. Términos reconocidos (incluye sinónimos técnicos) que coinciden con la regla:** "
-                f"{palabras}\n\n"
-                f"**3. Regla activada (ID {res.get('id')}):** síntoma registrado: "
+                f"**2. Términos que usted escribió y aparecen en la regla:** {originales}\n\n"
+                f"**3. Términos derivados por equivalencia técnica (no escritos por usted):** {derivados}\n\n"
+                f"**4. Términos descritos que la regla NO menciona:** {faltan}\n\n"
+                f"**5. Regla activada (ID {res.get('id')}):** síntoma registrado: "
                 f"*{res.get('sintoma') or 'No especificado'}* "
                 f"(DTC asociado: {res.get('dtc') or 'N/A'}). "
-                f"Confianza: {res.get('confianza')}%."
+                f"Coincidencia con la regla: {res.get('coincidencia')}% "
+                f"(umbral de aceptación: {UMBRAL_COINCIDENCIA}%)."
             )
         st.markdown(
             f"**Origen de la regla:** {origen}.  \n"
@@ -568,9 +578,14 @@ else:
             if c1.button("🔎 Analizar DTC"):
                 # Validación de entrada (Sprint 3): solo se consulta la base si el
                 # texto tiene formato real de DTC (letra + 4 caracteres, ej. P0300).
+                # Importante (obs. 4.5): ante una entrada vacía o inválida se limpia el
+                # resultado anterior; si no, seguía visible y producía un 2.º mensaje
+                # ("código no encontrado") junto al de formato inválido.
                 if not codigo:
+                    reset_diag()
                     st.warning("Ingresa un código DTC para analizar.")
                 elif not validar_dtc(codigo):
+                    reset_diag()
                     st.error("❌ Formato de DTC inválido. Debe ser una letra (P, B, C o U), "
                              "un dígito de 0 a 3 y tres caracteres hexadecimales. Ejemplo: P0300.")
                 else:
@@ -712,22 +727,33 @@ else:
                 # Si el texto cambió respecto al anterior, empezamos limpio
                 if sint.strip() != st.session_state.sint_actual:
                     reset_sint()
-                if sint.strip():
-                    # El motor devuelve una lista ordenada por confianza descendente.
-                    # Tomamos solo el primer resultado (el de mayor confianza).
+                if not sint.strip():
+                    reset_sint()
+                    st.warning("Describe la falla para analizar.")
+                else:
+                    # El motor devuelve una lista ordenada por coincidencia descendente.
+                    # Solo se recomienda si la mejor regla SUPERA el umbral (obs. 4.3);
+                    # si no, se piden más datos y no se sugiere ninguna reparación.
                     _t0 = time.perf_counter()
                     resultados = motor.buscar_por_sintoma(sint, tipo_v)
                     st.session_state.sint_t_inf = time.perf_counter() - _t0   # RNF3
                     fila = resultados[0] if resultados else None
-                    if fila:
+                    st.session_state.sint_actual = sint.strip()
+                    if fila and fila["suficiente"]:
                         st.session_state.sint_res    = fila
-                        st.session_state.sint_actual = sint.strip()
                         st.session_state.sint_inicio = time.time()
+                        st.session_state.sint_parcial = []
                         st.session_state.paso_sint   = 1
+                    elif fila:
+                        # Hay reglas relacionadas, pero la coincidencia es insuficiente
+                        st.session_state.sint_res     = None
+                        st.session_state.sint_parcial = resultados[:3]
+                        st.session_state.paso_sint    = -2
                     else:
-                        # Sin coincidencias: ni el texto ni sus sinónimos aparecen en la BD
-                        st.session_state.sint_actual = sint.strip()
-                        st.session_state.paso_sint   = -1
+                        # Sin coincidencias: ni el texto ni sus equivalencias aparecen en la BD
+                        st.session_state.sint_res     = None
+                        st.session_state.sint_parcial = []
+                        st.session_state.paso_sint    = -1
                     st.rerun()
 
             if col_b.button("🗑️ Limpiar"):
@@ -744,10 +770,35 @@ else:
                     st.success("Síntoma reportado para futura investigación.")
                     reset_sint()
 
+            # — Coincidencia insuficiente: NO se recomienda reparación (obs. 4.3) —
+            elif st.session_state.paso_sint == -2:
+                st.warning(
+                    f"⚠️ Los datos no bastan para recomendar un diagnóstico: ninguna regla "
+                    f"alcanza la coincidencia mínima ({UMBRAL_COINCIDENCIA}%) con lo descrito. "
+                    f"Agrega más detalle (síntoma concreto, cuándo ocurre, color del humo, "
+                    f"ruido, testigos encendidos) o ingresa el código DTC del escáner.")
+                parcial = st.session_state.get('sint_parcial', [])
+                if parcial:
+                    with st.expander("Reglas parcialmente relacionadas (no concluyentes)"):
+                        for q in parcial:
+                            falta = ", ".join(f"`{c}`" for c in q.get("sin_cobertura", [])) or "—"
+                            st.markdown(
+                                f"- Regla ID {q.get('id')} · síntoma registrado: "
+                                f"*{q.get('sintoma') or 'No especificado'}* · "
+                                f"coincidencia {q.get('coincidencia')}% · "
+                                f"términos sin cobertura: {falta}")
+                    st.caption("Solo se muestran como referencia; no son un diagnóstico.")
+                if st.button("📤 Reportar síntoma no resuelto", key="sint_rep_insuf"):
+                    motor.registrar_caso_pendiente(
+                        st.session_state.sint_actual, tipo_v,
+                        "Coincidencia insuficiente con la base", "Sintoma", st.session_state.user)
+                    st.success("Síntoma reportado para futura investigación.")
+                    reset_sint()
+
             # — PASO 1: Causa principal —
             elif st.session_state.paso_sint == 1:
                 r = st.session_state.sint_res
-                mostrar_confianza(r["confianza"])   # barra de porcentaje de coincidencia
+                mostrar_coincidencia(r["coincidencia"])   # coincidencia con la regla (no es probabilidad)
                 seguridad = r["seguridad"] or ""
                 mostrar_precaucion(seguridad)
                 st.info(f"**Causa 1:** {r['causa_p']}\n\n**Solución 1:** {r['solucion_p']}")
@@ -790,7 +841,7 @@ else:
             # — PASO 2: Causa secundaria —
             elif st.session_state.paso_sint == 2:
                 r = st.session_state.sint_res
-                mostrar_confianza(r["confianza"])
+                mostrar_coincidencia(r["coincidencia"])
                 st.error("🔎 Ruta Secundaria de Inspección")
                 if r["causa_s"]:
                     st.info(f"**Causa 2:** {r['causa_s']}\n\n**Solución 2:** {r['solucion_s']}")
