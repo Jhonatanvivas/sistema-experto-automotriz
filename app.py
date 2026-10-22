@@ -387,7 +387,7 @@ def mostrar_explicacion(metodo: str, entrada: str, tipo_v: str, res: dict, t_inf
             st.markdown(
                 f"**1. Hechos de entrada:** código `{entrada}` · tecnología *{tipo_v}*\n\n"
                 f"**2. Regla activada (ID {res.get('id')}):** SI el DTC es `{entrada}` "
-                f"Y la tecnología es *{tipo_v}* ENTONCES la causa más probable es: "
+                f"Y la tecnología es *{tipo_v}* ENTONCES la hipótesis más probable es: "
                 f"*{res.get('causa_p')}*\n\n"
                 f"**3. Síntoma asociado en la base de conocimiento:** "
                 f"{res.get('sintoma') or 'No especificado'}"
@@ -611,7 +611,7 @@ else:
 
                     # — PASO 1: Primera hipótesis (causa más probable) —
                     if st.session_state.paso_diag == 1:
-                        st.info(f"**Causa 1:** {res['causa_p']}\n\n**Solución 1:** {res['solucion_p']}")
+                        st.info(f"**Hipótesis 1:** {res['causa_p']}\n\n**Comprobación y acción 1:** {res['solucion_p']}")
                         mostrar_explicacion("DTC", st.session_state.dtc_actual, tipo_v, res, t_inf)
                         col1, col2 = st.columns(2)
 
@@ -657,7 +657,7 @@ else:
                     elif st.session_state.paso_diag == 2:
                         st.error("🔎 Ruta Secundaria de Inspección")
                         if res['causa_s']:
-                            st.info(f"**Causa 2:** {res['causa_s']}\n\n**Solución 2:** {res['solucion_s']}")
+                            st.info(f"**Hipótesis 2:** {res['causa_s']}\n\n**Comprobación y acción 2:** {res['solucion_s']}")
                         else:
                             # No todas las reglas tienen causa secundaria definida
                             st.warning("No hay causa secundaria registrada.")
@@ -801,7 +801,7 @@ else:
                 mostrar_coincidencia(r["coincidencia"])   # coincidencia con la regla (no es probabilidad)
                 seguridad = r["seguridad"] or ""
                 mostrar_precaucion(seguridad)
-                st.info(f"**Causa 1:** {r['causa_p']}\n\n**Solución 1:** {r['solucion_p']}")
+                st.info(f"**Hipótesis 1:** {r['causa_p']}\n\n**Comprobación y acción 1:** {r['solucion_p']}")
                 mostrar_explicacion("Síntoma", st.session_state.sint_actual, tipo_v, r,
                                     st.session_state.get('sint_t_inf', 0.0))
                 col1, col2 = st.columns(2)
@@ -844,7 +844,7 @@ else:
                 mostrar_coincidencia(r["coincidencia"])
                 st.error("🔎 Ruta Secundaria de Inspección")
                 if r["causa_s"]:
-                    st.info(f"**Causa 2:** {r['causa_s']}\n\n**Solución 2:** {r['solucion_s']}")
+                    st.info(f"**Hipótesis 2:** {r['causa_s']}\n\n**Comprobación y acción 2:** {r['solucion_s']}")
                 else:
                     st.warning("No hay causa secundaria registrada.")
                 mostrar_explicacion("Síntoma", st.session_state.sint_actual, tipo_v, r,
@@ -930,10 +930,10 @@ else:
                     n_tec  = c1.selectbox("Tecnología", [TECNOLOGIA_ACTIVA],
                                           help="Híbrido y Eléctrico están reservados para trabajo futuro.")
                     n_sin  = c2.text_area("Síntoma")
-                    n_cp   = st.text_area("Causa 1")
-                    n_sp   = st.text_area("Solución 1")
-                    n_cs   = st.text_area("Causa 2")          # opcional
-                    n_ss   = st.text_area("Solución 2")       # opcional
+                    n_cp   = st.text_area("Hipótesis 1 (causa probable)")
+                    n_sp   = st.text_area("Comprobación y acción 1", help="Formato: «Comprobación: … Si se confirma: …». Primero se comprueba la hipótesis; solo si se confirma se repara o reemplaza.")
+                    n_cs   = st.text_area("Hipótesis 2 (causa probable)")          # opcional
+                    n_ss   = st.text_area("Comprobación y acción 2")       # opcional
                     n_prot = st.text_input("Precaución (opcional)")
                     if st.form_submit_button("💾 Guardar"):
                         n_dtc = n_dtc.strip() or "N/A"
@@ -975,10 +975,10 @@ else:
                                 index=_tecs.index(data['tipo_vehiculo']) if data['tipo_vehiculo'] in _tecs else 0,
                                 format_func=etiqueta_tecnologia)
                             e_sin  = st.text_area("Síntoma",    value=data['sintoma'] or "")
-                            e_cp   = st.text_area("Causa 1",    value=data['causa_principal'] or "")
-                            e_sp   = st.text_area("Solución 1", value=data['solucion_principal'] or "")
-                            e_cs   = st.text_area("Causa 2",    value=data['causa_secundaria'] or "")
-                            e_ss   = st.text_area("Solución 2", value=data['solucion_secundaria'] or "")
+                            e_cp   = st.text_area("Hipótesis 1 (causa probable)",    value=data['causa_principal'] or "")
+                            e_sp   = st.text_area("Comprobación y acción 1", value=data['solucion_principal'] or "")
+                            e_cs   = st.text_area("Hipótesis 2 (causa probable)",    value=data['causa_secundaria'] or "")
+                            e_ss   = st.text_area("Comprobación y acción 2", value=data['solucion_secundaria'] or "")
                             e_prot = st.text_input("Precaución (opcional)", value=data['protocolo_seguridad'] or "")
                             if st.form_submit_button("💾 Actualizar"):
                                 e_dtc = e_dtc.strip().upper() or "N/A"
