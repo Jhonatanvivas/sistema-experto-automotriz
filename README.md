@@ -7,7 +7,7 @@ Autor: Jhonatan David Vivas Muñoz.
 
 > **Estado del proyecto:** prototipo en fase de validación. La base de conocimiento es un **borrador pendiente de validación por un experto técnico** y la precisión diagnóstica del sistema **aún no ha sido certificada**. No debe usarse como única fuente para intervenir un vehículo.
 
-Aplicación publicada: `[PENDIENTE: enlace de la app en Streamlit]`
+Aplicación publicada: (https://sistema-experto-automotriz.streamlit.app/)
 
 ---
 
@@ -26,16 +26,16 @@ Expert-Auto asiste a técnicos de talleres automotrices de Popayán en el diagn�
 
 | Módulo | Descripción |
 |---|---|
-| Diagnóstico por **código DTC** | Valida el formato OBD-II (ej. `P0300`) y consulta la regla asociada. |
-| Diagnóstico por **síntomas** | Texto libre en lenguaje del taller; muestra una recomendación solo si la coincidencia supera un umbral. |
-| Hipótesis y ruta secundaria | Hipótesis 1 con su comprobación y acción; si no resuelve, una hipótesis 2. |
-| Módulo de **explicación** | Muestra los hechos de entrada, la regla activada, su origen, las confirmaciones previas y el tiempo de inferencia. |
-| Precauciones de seguridad | Se muestran cuando la regla las define. |
-| **Reportes pendientes y aprendizaje asistido** | Los casos no resueltos pasan al administrador, quien registra la causa real y la solución. |
-| Base de conocimiento | Alta, edición y eliminación de reglas (administrador). |
-| Estadísticas y **dashboard de validación** | Tasa de resultados, tiempos, resultados por técnico y exportación a CSV. |
-| Reporte **PDF** | Se genera al confirmar un diagnóstico exitoso. |
-| Roles | `Administrador` y `Mecanico`. |
+1--> | Diagnóstico por **código DTC** | Valida el formato OBD-II (ej. `P0300`) y consulta la regla asociada. |
+2-->| Diagnóstico por **síntomas** | Texto libre en lenguaje del taller; muestra una recomendación solo si la coincidencia supera un umbral. |
+3-->| Hipótesis y ruta secundaria | Hipótesis 1 con su comprobación y acción; si no resuelve, una hipótesis 2. |
+4-->| Módulo de **explicación** | Muestra los hechos de entrada, la regla activada, su origen, las confirmaciones previas y el tiempo de inferencia. |
+5-->| Precauciones de seguridad | Se muestran cuando la regla las define. |
+6-->| **Reportes pendientes y aprendizaje asistido** | Los casos no resueltos pasan al administrador, quien registra la causa real y la solución. |
+7-->| Base de conocimiento | Alta, edición y eliminación de reglas (administrador). |
+8-->| Estadísticas y **dashboard de validación** | Tasa de resultados, tiempos, resultados por técnico y exportación a CSV. |
+9-->| Reporte **PDF** | Se genera al confirmar un diagnóstico exitoso. |
+10-->| Roles | `Administrador` y `Mecanico`. |
 
 ## 4. Cómo funciona el motor
 
@@ -143,6 +143,6 @@ Verifica la lógica del motor de síntomas sin conectarse a la base de datos. Us
 
 ## 12. Documentación y autoría
 
-- Documento del proyecto de grado: `[PENDIENTE: enlace]`
+- Documento del proyecto de grado: (https://docs.google.com/document/d/1kbdpSEd5QvdqC8wL4HzvU1qi_Rp7crrH/edit?usp=sharing&ouid=105111828453651123639&rtpof=true&sd=true)
 - Licencia: `[PENDIENTE: definir]`
 - Universidad Nacional Abierta y a Distancia (UNAD) — Programa de Ingeniería de Sistemas, Popayán.
