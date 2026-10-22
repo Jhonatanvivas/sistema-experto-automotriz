@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Secretos: nunca subir
+.streamlit/secrets.toml
+.env
+
+# Base SQLite antigua (el proyecto usa Supabase)
+*.db
